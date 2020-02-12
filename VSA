@@ -1,0 +1,362 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <string.h>
+
+#include "env.h"
+#include "vsb.h"
+#include "stgmgr.h"
+
+#define NULLP ((void *) 0)
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaInit - initialize variable storage manager                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* The Vsa series of functions are used to maintain an on-demand      */
+/* expandable contiguous piece of storage containing variable length  */
+/* storage entries.  When the current block of storage overflows as   */
+/* a result of an entry addition, a larger block is allocated and the */
+/* current smaller block's contents are copied to the larger block.   */
+/* The smaller block is discarded.                                    */
+/*                                                                    */
+/* Notes:                                                             */
+/* Add functions to get, seek, et al, entries.                        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tVsb * VsaInit(                        /* create storage block        */
+  struct stghdrq * StgQ,               /* i/  - storage anchor        */
+  tVso *           Vso,                /* i/  - control options       */
+  tVsaRc *         VsaRc               /*  /o - return code           */
+  )
+
+{
+
+  tVsb *           Vsb;                /* returned control block      */
+
+  /*
+  ** Validate parms
+  */
+
+  if (VsaRc == NULLP)
+    {
+    return(NULLP);
+    }
+
+  if ((StgQ == NULLP)
+    || (Vso == NULLP)
+    || (Vso->Length < 0)
+    || (Vso->MaxLength < 0))
+    {
+    *VsaRc = VsaErrorParm;
+    return(NULLP);
+    }
+
+  /*
+  ** Allocate and initialize Vsb.
+  */
+
+  if ((Vsb = stgget(StgQ, sizeof(tVsb))) == NULLP) /* allocated ?     */
+    {
+    *VsaRc = VsaErrorStgget;           /* no, error                   */
+    return(NULLP);
+    }
+
+  memcpy(Vsb->Eyecatch, VsbEyecatch, sizeof(tVsbEyecatch));
+  Vsb->StgQ = StgQ;
+  Vsb->Vso.Vcf = Vso->Vcf;
+  Vsb->Vso.Length =
+    ((Vso->Length == 0) ? 256 : Vso->Length);
+  Vsb->Vso.MaxLength =
+    ((Vso->MaxLength == 0) ? 256 : Vso->MaxLength);
+  Vsb->Used = 0;
+  Vsb->Allocated = 0;
+  Vsb->Count = 0;
+  Vsb->Current = 0;
+  Vsb->Origin = NULLP;
+
+  *VsaRc = 0;
+
+  return(Vsb);
+
+} /* VsaInit */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaAdd - Add a pre-populated entry to the storage block.           */
+/* An entry index is maintained at the end of the storage area.       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tVsaRc VsaAdd(                         /* add entry                   */
+  tVsb *           Vsb,                /* i/  - block control block   */
+  void *           Data,               /* i/  - data to add           */
+  int              Length              /* i/  - length of data to add */
+  )
+
+{
+
+  char *           NewOrigin;          /* new allocated storage origin*/
+  int              NewSize;            /* new allocated storage size  */
+
+/* verify Vsb */
+
+  if ((Data == NULLP)
+    || (Length == 0))
+    {
+    return(0);
+    }
+
+  if (Length > Vsb->Vso.MaxLength)     /* reasonable length ?         */
+    {
+    return(VsaErrorParm);              /* no, error                   */
+    }
+
+  if ((Vsb->Used +((Vsb->Count + 1) * sizeof(tVsi)) + Length)
+    > Vsb->Allocated)                  /* enough space ?              */
+    {
+    NewSize = Vsb->Allocated           /* no. assume incremental chg. */
+      + Vsb->Vso.Length;
+    if (((Vsb->Vso.Vcf & VcfDouble)    /* double allocation ?         */
+      != 0) && (Vsb->Allocated != 0))
+      {
+      NewSize = Vsb->Allocated * 2;    /* yes, double it              */
+      }
+    if ((NewOrigin =                   /* allocate more. Allocated ?  */
+      stgget(Vsb->StgQ, NewSize))
+      == NULLP)
+      {
+      return(VsaErrorStgget);          /* no, error                   */
+      }
+
+    /*
+    ** copy old to new
+    */
+
+    /* copy data */
+    if (Vsb->Used > 0)
+      {
+      memcpy(NewOrigin, Vsb->Origin, Vsb->Used);
+      }
+
+    /* copy index */
+    if (Vsb->Count > 0)
+      {
+      memcpy(
+        (NewOrigin + NewSize - (Vsb->Count * sizeof(tVsi))),
+        (Vsb->Origin + Vsb->Allocated - (Vsb->Count * sizeof(tVsi))),
+        Vsb->Count * sizeof(tVsi));
+      }
+
+    /* release old */
+    if ((Vsb->Origin != NULLP)
+      && (stgretn(Vsb->StgQ, Vsb->Allocated, Vsb->Origin) != 0))
+      {
+      stgretn(Vsb->StgQ, NewSize, NewOrigin);
+      return(VsaErrorStgretn);
+      }
+
+    Vsb->Allocated = NewSize;
+    Vsb->Origin = NewOrigin;
+
+    return(VsaAdd(Vsb, Data, Length));
+
+    }
+
+  /*
+  ** Add an entry.
+  */
+
+  memcpy(Vsb->Origin + Vsb->Used, Data, Length);
+  Vsb->Count++;
+  /* update index entry */
+  ((tVsi *)(Vsb->Origin + Vsb->Allocated -
+    (Vsb->Count * sizeof(tVsi))))->Offset = Vsb->Used;
+  ((tVsi *)(Vsb->Origin + Vsb->Allocated -
+    (Vsb->Count * sizeof(tVsi))))->Length = Length;
+  Vsb->Used += Length;
+  Vsb->Current = Vsb->Count;
+
+  return(0);
+
+} /* VsaAdd */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaTerm - terminate block storage                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Release all block related storage                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tVsaRc VsaTerm(                        /* terminate block storage     */
+  tVsb *           Vsb                 /* i/  - block control block   */
+  )
+
+{
+
+  struct stghdrq * StgQ;               /* storage anchor              */
+
+  if (Vsb->Origin != NULLP)
+    {
+    if (stgretn(Vsb->StgQ,             /* freed ?                     */
+      Vsb->Allocated, Vsb->Origin) != 0)
+      {
+      return(VsaErrorStgretn);         /* no, error                   */
+      }
+    }
+
+  StgQ = Vsb->StgQ;
+
+  if (stgretn(StgQ, sizeof(tVsb), Vsb) != 0) /* freed ?               */
+    {
+    return(VsaErrorStgretn);           /* no, error                   */
+    }
+
+  return(0);
+
+} /* VsaTerm */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaSeek - alter entry currency, return offset of entry             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Returns:                                                           */
+/*   offset of entry                                                  */
+/*   -1 - error                                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+int VsaSeek(                           /* position to a block entry   */
+  tVsb *           Vsb,                /* i/  - block control block   */
+  int              Vin,                /* i/  - relative entry index  */
+  tVor             Vor                 /* i/  - origin                */
+  )
+
+{
+
+  switch(Vor)
+    {
+    case VorSet:                       /* from the beginning          */
+      if ((Vin < 0)
+        || (Vin > Vsb->Count))
+        {
+        return(-1);
+        }
+      Vsb->Current = Vin;
+      break;
+
+    case VorCur:                       /* from the current position   */
+      if (((Vin + Vsb->Current) < 0)
+        || ((Vin + Vsb->Current) > Vsb->Count))
+        {
+        return(-1);
+        }
+      Vsb->Current += Vin;
+      break;
+
+    case VorEnd:                       /* from the end                */
+      if (((Vin + Vsb->Count) < 0)
+        || ((Vin + Vsb->Count) > Vsb->Count))
+        {
+        return(-1);
+        }
+      Vsb->Current = Vsb->Count + Vin;
+      break;
+
+    default:
+      return(-1);
+      break;
+    } /* switch */
+
+  return(VsaTell(Vsb));
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaSeekPtr - alter entry currency, return address of entry.        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Returns:                                                           */
+/*   address of entry                                                 */
+/*   NULLP - error                                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+void * VsaSeekPtr(                     /* seek an entry, return ptr.  */
+  tVsb *           Vsb,                /* i/  - block control block   */
+  int              Vin,                /* i/  - relative entry index  */
+  tVor             Vor                 /* i/  - origin                */
+  )
+
+{
+
+  int              Offset;             /* entry offset                */
+
+  if ((Offset = VsaSeek(Vsb, Vin, Vor)) < 0)
+    {
+    return(NULLP);
+    }
+
+  return(Vsb->Origin + Offset);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* VsaTell - return offset of current entry                           */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Returns:                                                           */
+/*   offset of entry                                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+int VsaTell(                           /* return offset of crnt entry */
+  tVsb *           Vsb                 /* i/  - block control block   */
+  )
+
+{
+
+  if (Vsb->Current == 0)
+    {
+    return(0);
+    }
+
+  if (Vsb->Current == Vsb->Count)
+    {
+    return(Vsb->Used);
+    }
+
+  return(
+    ((tVsi *)(Vsb->Origin + Vsb->Allocated -
+    ((Vsb->Current + 1) * sizeof(tVsi))))->Offset
+    );
+
+}

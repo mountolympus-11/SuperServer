@@ -1,0 +1,138 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>************************************************************* 00010000
+*                                                                     * 00020000
+*  Module: FLTTCIP - Host Xport Filter / Request Rtns (TCP/IP)        * 00030000
+*                                                                     * 00040000
+*  Description:                                                       * 00050000
+*                                                                     * 00060000
+*     This module contains functions specific to the TCP/IP           * 00070000
+*     implementation of Host Xport facility.  These functions are     * 00080000
+*     indentified to XPORT via the associated Xport profile table     * 00090000
+*     Entry.  Filter routines may be used to massage the data         * 00100000
+*     before and after xport processing.  The Request selector        * 00110000
+*     routines are called to determine the type of xport request      * 00120000
+*     from the TCP/IP data structures.                                * 00130000
+*                                                                     * 00140000
+*  External Functions:                                                * 00150000
+*                                                                     * 00160000
+*     reqcpic - Select request type from CPI-C request                * 00170000
+*                                                                     * 00180000
+**<DOC-OFF>************************************************************ 00190000
+*                                                                     * 00200000
+*  Maintenance:                                                       * 00210000
+*                                                                     * 00220000
+*     03/24/95  R. Colmone                                            * 00230000
+*               Initial Version                                       * 00240000
+*                                                                     * 00250000
+**********************************************************************/ 00260000
+                                                                        00270000
+#include <stddef.h>                                                     00280000
+#include "env.h"                                                        00290000
+#include "hxpprof.h"                                                    00300000
+#include "hxptcip.h"                                                    00310000
+                                                                        00320000
+/*<DOC-ON>************************************************************* 00330000
+*                                                                     * 00340000
+*  Function:  fltcipo - Construct outbound TCP/IP packet              * 00350000
+*                                                                     * 00360000
+*  Description:                                                       * 00370000
+*                                                                     * 00380000
+*     This function will construct the outbound TCP/IP packet         * 00390000
+*     including the TCP/IP packet header.                             * 00400000
+*                                                                     * 00410000
+*  Parameters:                                                        * 00420000
+*                                                                     * 00430000
+*     Address of source data                                          * 00440000
+*     Length  of source data                                          * 00450000
+*     Address of target area                                          * 00460000
+*     Length  of target area                                          * 00470000
+*                                                                     * 00480000
+*  Return:                                                            * 00490000
+*                                                                     * 00500000
+*     Pos value  - Length of target packet with filter overhead       * 00510000
+*     Neg value  - Required length of target area                     * 00520000
+*                                                                     * 00530000
+**<DOC-OFF>***********************************************************/ 00540000
+                                                                        00550000
+int fltcipo(char *src, int srclen, char *tgt, int tgtlen ) {            00560000
+                                                                        00570000
+    sTcpIpPacketHdr  *pkh ;                                             00580000
+    char             *bp  ;                                             00590000
+    int               len ;                                             00600000
+                                                                        00610000
+    len = srclen + TCH_LEN ;                                            00620000
+                                                                        00630000
+    if ( len > tgtlen )                                                 00640000
+        return ( - len ) ;                                              00650000
+                                                                        00660000
+/*  ---------------------------------------------------------------     00670000
+    Construct TCP/IP data packet include header                         00680000
+    --------------------------------------------------------------- */  00690000
+    pkh = (sTcpIpPacketHdr *) tgt ;                                     00700000
+                                                                        00710000
+    pkh->hdrlen     = TCH_LEN ;                                         00720000
+    pkh->datalen    = srclen ;                                          00730000
+    pkh->version    = TCH_VERSION ;                                     00740000
+    pkh->xlate      = TCH_XLATE ;                                       00750000
+    pkh->packettype = XPTCH_ONLY ;                                      00760000
+                                                                        00770000
+/*  ---------------------------------------------------------------     00780000
+    Copy Xport buffer to Packet                                         00790000
+    --------------------------------------------------------------- */  00800000
+    bp = (char *) (pkh + 1) ;                                           00810000
+    memcpy( bp, src, srclen ) ;                                         00820000
+                                                                        00830000
+    return len ;                                                        00840000
+                                                                        00850000
+}                                                                       00860000
+                                                                        00870000
+/*<DOC-ON>************************************************************* 00880000
+*                                                                     * 00890000
+*  Function:  reqtcip - Select request type from TCP/IP request       * 00900000
+*                                                                     * 00910000
+*  Description:                                                       * 00920000
+*                                                                     * 00930000
+*     This function will determine the request type from the TCP/IP   * 00940000
+*     Communication area block.  The selected request type is then    * 00950000
+*     used to lookup the Xport request type in the Xport profile      * 00960000
+*     table Request/Reply formats for the associated Profile table    * 00970000
+*     entry.                                                          * 00980000
+*                                                                     * 00990000
+*  Parameters:                                                        * 01000000
+*                                                                     * 01010000
+*     Address of request structure                                    * 01020000
+*     Address of commblk                                              * 01030000
+*                                                                     * 01040000
+*  Return:  ZERO - All conditions                                     * 01050000
+*                                                                     * 01060000
+**<DOC-OFF>***********************************************************/ 01070000
+                                                                        01080000
+int reqtcip( struct request *req, void *commblk ) {                     01090000
+                                                                        01100000
+    struct xptcip *tcip ;                                               01110000
+                                                                        01120000
+    tcip = (struct xptcip *) commblk ;                                  01130000
+                                                                        01140000
+    if ( tcip->pkhdr.packettype == XPTCH_ONLY )                         01150000
+        req->method = FUNCTION ;                                        01160000
+                                                                        01170000
+    return 0 ;                                                          01180000
+                                                                        01190000
+}                                                                       01200000

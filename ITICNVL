@@ -1,0 +1,36 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+
+long iticnvl( char *str, int leng )
+{
+     char  bufrí128ù ;
+
+     if ( leng <= 0 || leng >= 128 )
+          return 0 ;
+
+     memset( bufr, 0, 128 ) ;
+     memcpy( bufr, str, leng ) ;
+
+     return atol(bufr) ;
+
+}
+
+

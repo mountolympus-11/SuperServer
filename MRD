@@ -1,0 +1,146 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* MRD - message ($MSG) reporting device.                             */
+/*                                                                    */
+/* Open, Write, and Close exit routines to support the writing of data*/
+/* (from RPT services calls) through $MSG services.  Refer to $MSG    */
+/* services and RPT services.                                         */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#include "env.h"                       /* environment                 */
+#include "rcb.h"                       /* report control block        */
+#include "msg.h"                       /* message handler             */
+#include "stgmgr.h"                    /* storage manager             */
+#include "mrd.h"                       /* message reporting device    */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write to Messsage Reporting device                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptMsgWrite(                    /* i/  - write to msg device   */
+  tRcb *           Rcb                 /* i/  - report control block  */
+  )
+
+{
+
+#define mMRD ((tMrd *)Rcb->Rdc)
+
+  Rcb->DataíRcb->LineLengthù = '\0';   /* truncate extra text (if any)*/
+
+  msg(                                 /* write message               */
+    &mMRD->MsgH,                       /* i/  - message handle        */
+    mMRD->MsgNumber,                   /* i/  - message number        */
+    1,                                 /* i/  - substitution fields   */
+    Rcb->Data,                         /* i/  - message subst. text   */
+    strlen(Rcb->Data)                  /* i/  - message subst. length */
+    );
+
+  memset(mMRD->MsgBuffer, 0, sizeof(mMRD->MsgBuffer));
+
+  return(RptOK);
+
+#undef mMRD
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Open Messsage Reporting device                                     */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptMsgOpen(                     /* open message report device  */
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tMop *           Mop                 /* i/  - msg device open parms */
+  )
+
+{
+
+#define mMRD ((tMrd *)Rcb->Rdc)
+
+/*
+** Allocate device control area and hang it in the report's (RCB)
+** storage queue.
+*/
+
+  if ((Rcb->Rdc = stgget(Rcb->StgQ, sizeof(tMrd))) == NULLP)
+    {
+    return(RptErrorStgget);            /* allocation failed           */
+    }
+
+/*
+** Retain device control values in control area.
+*/
+
+  mMRD->MsgNumber = Mop->MsgNumber;
+  mMRD->Options = Mop->Options;
+
+  msgdft(                              /* set message default values  */
+    &mMRD->MsgH,                       /*  /o - handle in device area */
+    Mop->Prefix,                       /* i/  - message prefix        */
+    Mop->Component,                    /* i/  - component code        */
+    Mop->Table,                        /* i/  - message table         */
+    Mop->Destination,                  /* i/  - destination mask      */
+    Mop->ConsoleId,                    /* i/  - console id            */
+    mMRD->MsgBuffer,                   /* i/  - construction buffer   */
+    sizeof(mMRD->MsgBuffer),           /* i/  - buffer length         */
+    Mop->MsgIdControl,                 /* i/  - msg id generation ctl */
+    Mop->DestAux,                      /* i/  - Additional destination*/
+    Mop->MCSConsole,                   /* i/  - MCS console name      */
+    Mop->MCSResponse,                  /* i/  - MCS cmd resp token    */
+    Mop->MsgQAnchor,                   /* i/  - Msg queue anchor addr */
+    Mop->MsgStgQ                       /* i/  - Stgmgr storage queue  */
+    );
+
+  return(RptOK);                       /* successful                  */
+
+#undef mMRD
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Close Messsage Reporting device                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptMsgClose(
+  tRcb *           Rcb                 /* i/  - report control block  */
+  )
+
+{
+
+/* flush any remaining messages */
+/* free device control area storage */
+
+  if (stgretn(Rcb->StgQ, sizeof(tMrd), Rcb->Rdc) != 0)
+    {
+    return(RptErrorStgretn);           /* allocation failed           */
+    }
+
+  return(0);
+
+}
+
+/*--------------------------------------------------------------------*/

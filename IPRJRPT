@@ -1,0 +1,776 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+
+#include "env.h"
+#include "xacthdr.h"
+#include "version.h"
+#include "xymove.h"
+#include "stgmgr.h"                    /* storage manager             */
+#include "procsrv.h"
+#include "msg.h"
+#include "nav.h"
+#include "equs.h"
+#include "rcb.h"                       /* report control block        */
+#include "cmdscan.h"                   /* command scan                */
+#include "csp.h"                       /* command scan                */
+
+typedef struct sRuc                    /* request unit control data   */
+  {
+/*char         Deviceí256ù; */         /* device options              */
+  struct reqseg * Rq;                  /* request segment             */
+  } tRuc;
+
+#include "rud.h"                       /* request unit device         */
+/* ******************************************************************
+
+    Function:  IPRJRPT - Generate project report and analysis
+
+    Description:
+
+        .
+        .
+
+    Notes:
+
+        .
+        .
+
+    Attributes:  Conversational transaction
+
+    Returns:
+
+        .
+
+   ****************************************************************** */
+
+
+/* ------------------------------------------------------------------
+    STDENV service failure descriptions via $MSG number
+   ------------------------------------------------------------------ */
+
+#define  ERR_TXPISRT   20         /* TXP buffer management error      */
+#define  ERR_TRECV     21         /* unable to TRECV request segment  */
+#define  ERR_EPBPOST   22         /* unable to post XRU scheduler     */
+#define  ERR_CANCEL    23         /* request cancelled                */
+
+/* ------------------------------------------------------------------
+    Common data structures
+   ------------------------------------------------------------------ */
+
+struct reqseg  {                  /* conv request/response summary    */
+    int    epbtoken ;             /* EPB token to signal resp ready   */
+    struct xh     *xhin ;         /* inbound RU - header              */
+    struct xeconv *convin ;       /* inbound RU - conv hdr extension  */
+    struct xymove *movein ;       /* inbound RU - request block       */
+    struct xeconv *convout ;      /* outbound - conv hdr extension    */
+    struct xymove *moveout ;      /* outbound - response block        */
+    struct tmsg   reqmsg ;        /* conversation segment request msg */
+} ;
+
+struct rptoptns  {                /* report options                   */
+    char   opt1 ;
+    char   opt2 ;
+    char   opt3 ;
+    char   opt4 ;
+    char   opt5 ;
+    char   opt6 ;
+    char   opt7 ;
+    char   opt8 ;
+} ;
+
+/* Extracted Integrator Report option strings */
+typedef struct sIrs                    /* Integrator Report option str*/
+  {
+  char             Formatí256ù;        /* report format options string*/
+  char             Deviceí256ù;        /* report device options str.  */
+  char             Projectí256ù;       /* Prj report options string   */
+  } tIrs;
+
+
+/* ------------------------------------------------------------------
+    Local function prototypes
+   ------------------------------------------------------------------ */
+
+void RptPrj(                      /* report on a project              */
+    tIrs *,                       /* i/  - integrator report strings  */
+    tRdr *,                       /* i/  - report-device routines     */
+    void *                        /* i/  - device data                */
+    );
+/*                           */
+/*  struct reqseg *,         */   /* conversation req/resp summary    */
+/*  tIrs *            );     */   /* report options                   */
+
+int getropts(
+    struct reqseg   *rq,          /* conversation req/resp summary    */
+    struct rptoptns *opts,        /* report options                   */
+    char   *parms,                /* source option string origin      */
+    int    parmlen ) ;            /* length of option string          */
+
+#define GetIntRptStrings GETIRS
+
+int GetIntRptStrings(                  /* get integrator report strs. */
+  char *,                              /* i/  - keyword command string*/
+  tIrs *,                              /*  /o - posted values block   */
+  char *                               /*  /o - error message area    */
+  );
+
+int addline(
+    struct reqseg *rq,            /* conversation req/resp summary    */
+    char   *buffer ) ;            /* message line as stringz          */
+
+int waitreq(
+    struct reqseg *rq ) ;         /* conversation req/resp summary    */
+
+int resprdy(
+    struct reqseg *rq,            /* conversation req/resp summary    */
+    int    postcode ) ;           /* event completion post code       */
+
+void convend(
+    struct reqseg *rq,            /* conversation req/resp smry or 0  */
+    int    msgid,                 /* response and/or msgid if >= 0    */
+    int    retc,                  /* return code                      */
+    int    rsnc,                  /* reason code                      */
+    int    infoc ) ;              /* info code (service rtn retcode)  */
+
+
+/* ******************************************************************
+
+    Function: iprjrpt - parameterized project report driver
+
+    Method:
+
+        - await initial request segment
+        - acquire parameter options, if provided
+        - generate project report
+        - return, terminating the conversation
+
+    On Entry:
+
+        Parameters provided by $PROC CREATE are not currently used
+
+    On Exit:
+
+        End of the conversation segment is signified by making the
+        appropriate updates to the response block and conversational
+        transaction hdr extension, and then posting the response-
+        ready EPB with a success / failure post code.  At end of
+        conversation, the process is terminated via return.
+
+    Maintenance:
+
+    8/24/95 - T. Weltzer
+      added logic to null terminate inbound object
+
+   ****************************************************************** */
+
+void iprjrpt()  {
+
+    char            pí256ù;       /* Z-string version of obj.(options)*/
+    char *          pp = &p;      /* null string pointer              */
+    int             length = 0;   /* length of object                 */
+    struct reqseg   rq ;          /* conversaton req/resp summary     */
+    struct xymove   *m ;
+    tIrs            Irs;          /* integrator report option strings */
+    char            Msgí256ù = "";/* message buffer                   */
+    tRdr            Rdr;          /* report device routines (RU rtns) */
+    tRud            Rud;          /* request unit (RU) device data    */
+/*  struct rptoptns opts ; */     /* report options                   */
+
+    if ( ! waitreq( &rq ) )
+        return ;
+
+    m = rq.movein ;
+
+    if ( m->xymvobjl )            /* object is options or proj. name? */
+      {
+      length = min(m->xymvobjl, sizeof(p) - 1);/* yes                 */
+      memcpy(p, m->xymvobj, length); /* possible string truncation    */
+      pílengthù = 0;              /* null terminate the string        */
+      }
+    else
+     {
+     pp = NULLP;                  /* implies ancient workbench version*/
+     }
+
+    memset(&Irs, '\0', sizeof(tIrs));
+
+    if ( GetIntRptStrings(pp, &Irs, Msg) != 0)
+      {
+/* need to respond with a message */
+      return ;
+      }
+
+    Rdr.Open = RptRuOpen;
+    Rdr.Write = RptRuWrite;
+    Rdr.Close = RptRuClose;
+
+    Rud.Rq = &rq;
+
+    RptPrj(&Irs, &Rdr, &Rud);
+
+/*  RptPrj(&rq, &Irs) ; */
+/* need a return code to check */
+
+    return ;
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Get Integrator Report option strings.                              */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* The Integrator Report options string is a string of strings.       */
+/* The extracted strings are option strings targeted to specific      */
+/* reports, devices, and format controllers,  These strings are       */
+/* forwarded to, and processed further by, the targeted entity.       */
+/*                                                                    */
+/* "Get Integrator Report option strings" extacts these strings from  */
+/* the supplied string and copies them into the supplied control      */
+/* block.                                                             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+/*
+"RPTPRJ(\".....\")"
+"FORMAT(\"....\")"
+"DEVICE(\"....\")"
+*/
+
+/* Integrator Report option strings keyword ids */
+#define IrsFormat  1                   /* format control options str. */
+#define IrsDevice  2                   /* device control options str. */
+#define IrsProject 3                   /* Project report options str. */
+#define IrsKeywordCount 3              /* current max keywords        */
+
+int GetIntRptStrings(                  /* get integrator report strs. */
+  char *           String,             /* i/  - keyword command string*/
+  tIrs *           Irs,                /*  /o - posted values block   */
+  char *           Msg                 /*  /o - error message area    */
+  )
+
+{
+
+  int              Rc = 0;             /* return code                 */
+  int              Index;
+
+  /*
+  ** Option strings (format and report contents).
+  */
+
+  static const char OptionStringíù =
+    " FORMAT(\"LINES(60) WIDTH(120)\") "
+    " RPTPRJ(\"REC ATR SUCC PRED SCRL VARS RGNS IMG REL SKS"
+    " MSGS LGNDS RSX TSX PSL\")";
+
+/*
+** Integrator reports string's keywords.
+*/
+
+  static const char DefFormatíù = "";  /* default format options      */
+  static const char DefDeviceíù = "";  /* default device options      */
+  static const char DefProjectíù = ""; /* defalut project report opts.*/
+
+/*
+** Integrator Reports control string keyword table.
+*/
+
+  static const struct keytab IrsKeyTableíù =
+    {
+    KEYE("FORMAT", 0, 1, IrsFormat,  NOTYPE),/* format control options*/
+    KEYE("DEVICE", 0, 1, IrsDevice,  NOTYPE),/* device control options*/
+    KEYE("RPTPRJ", 0, 1, IrsProject, NOTYPE),/* Project Report options*/
+    KEYENULL
+    };
+
+/*
+** Integrator Reports operand value-posting control table.
+*/
+
+  static const struct postops IrsOpTableíù =
+    {
+    {IrsFormat,  offsetof(tIrs, Format), sizeof(Irs->Format) - 1,
+      1, 0, 0, sizeof(DefFormat), DefFormat},
+    {IrsDevice,  offsetof(tIrs, Device), sizeof(Irs->Device) - 1,
+      1, 0, 0, sizeof(DefFormat), DefDevice},
+    {IrsProject, offsetof(tIrs, Project), sizeof(Irs->Project) - 1,
+      1, 0, 0, sizeof(DefProject), DefProject},
+    {0, 0, 0, 0, 0 ,0 ,0, 0}
+    };
+
+  /* older workbenches send up the 8 char project name as the object */
+  if ((String == NULLP)
+     || (strlen(String) <= 8))  /* RPTPRJ("") */
+     {
+     String = (char *)OptionString;   /* use default options          */
+     }
+
+  Rc = CmdScanPost(                   /* scan and post command values */
+    (struct keytab *)IrsKeyTable,     /* i/  - keyword table          */
+    IrsKeywordCount,                  /* i/  - keyword table entries  */
+    (struct postops *)IrsOpTable,     /* i/  - operand post control   */
+    String,                           /* i/  - command string         */
+    Irs,                              /*  /o - control block to post  */
+    Msg                               /*  /o - error message buffer   */
+    );
+
+/* remove trailing blanks */
+
+  for (Index = sizeof(Irs->Format) - 2;
+    (Index >= 0) && (Irs->FormatíIndexù == ' ');
+    Irs->FormatíIndexù = 0, Index--)
+    {
+    ;
+    }
+
+  for (Index = sizeof(Irs->Project) - 2;
+    (Index >= 0) && (Irs->ProjectíIndexù == ' ');
+    Irs->ProjectíIndexù = 0, Index--)
+    {
+    ;
+    }
+
+  for (Index = sizeof(Irs->Device) - 2;
+    (Index >= 0) && (Irs->DeviceíIndexù == ' ');
+    Irs->DeviceíIndexù = 0, Index--)
+    {
+    ;
+    }
+
+  return(Rc);
+
+}
+
+/* ******************************************************************
+
+    Function: report - mock report
+
+   ****************************************************************** */
+
+void report(
+    struct reqseg *rq,            /* conversation req/resp summary    */
+    struct rptoptns *opts )       /* report options                   */
+
+{
+    int   i ;
+    char  bufferí128ù ;
+
+    for ( i = 1 ; i <= 1000 ; i++ )  {
+        format( buffer, "This is the %dth report message", i ) ;
+
+        if ( ! addline( rq, buffer ) )
+            return ;
+    }
+
+    convend( rq, -1, RC00, RSN00, 0 ) ;
+}
+
+/* ******************************************************************
+
+    Function: addline - insert line in bufferred report
+
+    On Exit:
+
+        TRUE  - message line inserted in response
+        FALSE - service routine failure encountered
+
+   ****************************************************************** */
+
+int addline(
+    struct reqseg *rq,            /* conversation req/resp summary    */
+    char   *buffer )              /* message line as stringz          */
+
+{
+    int    ll ;
+    void   *isrtloc ;
+    struct xymove *m ;
+
+    struct vline  {               /* var length entry line format     */
+        short  datalen ;          /* non-inclusive line length        */
+        char   dataí256ù ;        /* data component of line           */
+    }   vl ;
+
+    if ( vl.datalen = strlen( buffer ) )
+        memcpy ( &vl.data, buffer, vl.datalen ) ;
+
+    ll = vl.datalen + sizeof( vl.datalen ) ;
+
+    if ( ! ( isrtloc = txpisrt( ll, (char *) &vl ) ) )  {
+
+        if ( ! resprdy( rq, 0 ) || ! waitreq( rq ) )
+            return FALSE ;
+
+        if ( ! ( isrtloc = txpisrt( ll, (char *) &vl ) ) )  {
+            convend( rq, ERR_TXPISRT, RC12, RSN08, 0 ) ;
+            return FALSE ;
+        }
+    }
+
+/*  -----------------------------------------------------------------
+     a new entry of length (ll) has been appended to the response blk
+    ----------------------------------------------------------------- */
+
+    m = rq->moveout ;
+
+    m->xymvfmt  |= XYMVFVAR ;
+    m->xymvactn |= ( XYMVATXT + XYMVAXLA ) ;
+    m->xymvblkl += ll ;
+    m->xymventc++ ;
+
+    if ( m->xymvblko == 0 )
+        m->xymvblko = (char *)isrtloc - (char *) m ;
+
+    rq->convout->xecvopts |= XECVOCNF ;
+
+    return TRUE ;
+}
+
+/* ******************************************************************
+
+    Function: waitreq - await response request segment and init
+
+    Description:
+
+        This routine is used to wait for, and then acquire, the next
+        request segment from the conversation partner.  Upon receipt,
+        the request/response summary block is reconfigured with
+        information describing both the inbound request segment and
+        an initialized response block.
+
+    Method:
+
+        - clear the req/resp summary (REQSEG); it is no longer valid
+        - use the stdenv TRECV service to acquire the request segment
+        - reinitialize the req/resp summary with new information
+        - construct and init an xymove for use as response block
+
+    On Exit:
+
+        TRUE  - request segment received, *rq initialized
+        FALSE - conversation severed by service routine failure
+
+   ****************************************************************** */
+
+int waitreq( struct reqseg *rq )  {
+
+/*  int  i, r, respsize ; */
+    int     r, respsize ;
+    char *loc ;
+
+    memset( rq, 0, sizeof( struct reqseg ) ) ;
+
+/*  -----------------------------------------------------------------
+     acquire request segment using stdenv TRECV service
+    ----------------------------------------------------------------- */
+
+    r = trecv( TRECV_PCB, TRECV_WAIT, &rq->reqmsg, sizeof(rq->reqmsg) );
+
+    if ( r )  {
+        convend( 0, ERR_TRECV, RC12, RSN04, 0 ) ;
+        return FALSE ;
+    }
+
+/*  -----------------------------------------------------------------
+     reinitialize the req/resp summary with new inbound/outbound info
+    ----------------------------------------------------------------- */
+
+    rq->epbtoken = rq->reqmsg.epbtoken ;
+    rq->xhin     = rq->reqmsg.words.parm1 ;
+    rq->convin   = (struct xeconv *) (rq->xhin + 1) ;
+    rq->movein   = (struct xymove *) rq->convin ;
+    rq->convout  = rq->reqmsg.words.parm2 ;
+
+/*  -----------------------------------------------------------------
+     construct and initialize an xymove for use as a response block
+    ----------------------------------------------------------------- */
+
+/*  respsize = XYMOVELN + rq->movein->xymvobjl - XECVXELN ; */
+    respsize = XYMOVELN - XECVXELN ;
+    loc      = txpisrt( respsize, 0 ) ;
+
+    if ( ! loc )  {
+        convend( rq, ERR_TXPISRT, RC12, RSN08, 0 ) ;
+        return FALSE ;
+    }
+
+    rq->moveout = (struct xymove *) rq->convout ;
+
+    rq->moveout->xymvobjl = 0 ;
+
+/* do not echo it back
+    if ( i = rq->movein->xymvobjl )  {
+        rq->moveout->xymvobjl = i ;
+        memcpy( rq->moveout->xymvobj, rq->movein->xymvobj, i ) ;
+    }
+*/
+
+    if ( rq->convout->xecvstat & XECVSFIN )  {
+        convend( rq, ERR_CANCEL, RC08, RSN00, 0 ) ;
+        return FALSE ;
+    }
+
+    return TRUE ;
+}
+
+/* ******************************************************************
+
+    Function: resprdy - signal 'response ready'
+
+    Description:
+
+        This function is used to post the originator of a request
+        segment to indicate that the response is ready for
+        dissemination to the coop, et. al.  The post code provided
+        can be used as a coarse indication of success or failure.
+
+    On Exit:
+
+        TRUE  - request segment received, *rq initialized
+        FALSE - conversation severed by service routine failure
+
+   ****************************************************************** */
+
+int resprdy(
+    struct reqseg *rq,            /* conversation req/resp summary    */
+    int    postcode )             /* event completion post code       */
+
+{
+    int  rc ;
+
+    if ( ! ( rc = epbpost( rq->epbtoken, postcode ) ) )
+        return TRUE ;
+
+    else  {
+        convend( 0, ERR_EPBPOST, RC12, RSN12, rc ) ;
+        return FALSE ;
+    }
+}
+
+/* ******************************************************************
+
+    Function: convend - post completion of request / segment
+
+    Description:
+
+        This function accepts completion codes and an optional msg id
+        and attempts to close the current conversation by marking
+        the conversational transaction hdr extension COMPLETE or
+        ERROR.  Error completions are recognized when the return
+        code (RETC) is greater than four.
+
+        If communication with the conversation partner is still
+        possible, as determined by the presence of the input RQ, its
+        associated CONVOUT hdr extension, and the response block,
+        the message will be placed in the response block.
+
+   ****************************************************************** */
+
+void convend(
+    struct reqseg *rq,            /* conversation req/resp smry or 0  */
+    int    msgid,                 /* response and/or msgid if >= 0    */
+    int    retc,                  /* return code                      */
+    int    rsnc,                  /* reason code                      */
+    int    infoc )                /* info code (service rtn retcode)  */
+
+{
+    int    mrc = -1 ;
+    struct xeconv *e = 0 ;        /* conv hdr extension area          */
+    struct xymove *y = 0 ;        /* response block                   */
+    char   bufferí256ù ;          /* message contstruction area       */
+    void   *loc ;                 /* TXP ISRT return location         */
+    MSGH   msgh ;                 /* message construction capability  */
+    struct msgru *rum ;           /* message in RU format             */
+
+    msgdft( &msgh,
+            MSGDEFAULT,
+            "XRU",
+            MSGDEFAULT,
+            (BUFFER | LOGFILE),
+            MSGDEFAULT,
+            buffer,
+            sizeof( buffer ),
+            MSGID, 0,0,0,0,0 ) ;
+
+/* ------------------------------------------------------------------
+    update conversational request/response hdr - ending conversation
+   ------------------------------------------------------------------ */
+
+    if ( rq && (e = rq->convout ) )  {
+
+        if ( retc < RC08 )
+            e->xecvstat |= XECVSOK ;
+        else
+            e->xecvstat |= XECVSERR ;
+    }
+
+/* ------------------------------------------------------------------
+    issue diagnostic message, retain local copy for response
+   ------------------------------------------------------------------ */
+
+    if ( msgid >= 0 )  {
+        maddstr( msgh, "Project Report", 0 ) ;
+        maddint( msgh, retc ) ;
+        maddint( msgh, rsnc ) ;
+        maddint( msgh, infoc ) ;
+
+        mrc = msg( &msgh, msgid, 0 ) ;
+    }
+
+/* ------------------------------------------------------------------
+    update response block, insert appropriate msg text if msgid given
+   ------------------------------------------------------------------ */
+
+    if ( rq && (y = rq->moveout) )  {
+        y->xymvretc = retc ;
+        y->xymvrsnc = rsnc ;
+        y->xymvinfo = infoc ;
+
+        if ( msgid >= 0 && mrc == 0 )  {
+            rum = msgru( (struct msgbuf *) buffer ) ;
+
+            if ( loc = txpisrt( rum->len + 2, (char *) rum ) )  {
+                y->xymvmsgo = (char *)loc - (char *) y ;
+                y->xymvmsgc++ ;
+            }
+        }
+    }
+
+/* ------------------------------------------------------------------
+    post requestor with result if approp linkages remain
+   ------------------------------------------------------------------ */
+
+    if ( e )
+        resprdy( rq, 0 ) ;
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Report device routines                                             */
+/* The following routines are invoked by report services for output   */
+/* operations (report writing).                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptRuOpen(                      /* open dos file for reporting */
+  tRcb *            Rcb,               /* i/o - report control block  */
+  void *            Rud                /* i/  - RU data               */
+  )
+
+{
+
+  if ((Rcb->Rdc = stgget(Rcb->StgQ, sizeof(tRuc))) == NULLP)
+    {
+    return(RptErrorStgget);            /* allocation failed           */
+    }
+
+  /*
+  ** Retain device data.
+  */
+
+  ((tRuc *)Rcb->Rdc)->Rq = ((tRud *)Rud)->Rq;
+
+  return(0);
+
+} /* RptRuOpen */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write RU line                                                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptRuWrite(                     /* write data to RU            */
+  tRcb *           Rcb                 /* i/o - report control block  */
+  )
+
+{
+
+  int              LineFeeds;
+
+  if (Rcb->Rls < 0)                    /* form feed (page eject) ?    */
+    {
+    if (!addline(((tRuc *)Rcb->Rdc)->Rq, "\f")) /* yes, add form feed */
+      {
+      return(RptErrorIo);
+      }
+    }
+  else
+    {                                  /* line feeds                  */
+    for (LineFeeds = Rcb->LeadLines ; LineFeeds > 0; LineFeeds--)
+      {
+      if (!addline(((tRuc *)Rcb->Rdc)->Rq, " "))
+        {
+        return(RptErrorIo);
+        }
+      } /* for */
+    }
+
+  /*
+  ** Write data.
+  */
+
+  /* truncate potentially-extra data */
+  Rcb->DataíRcb->LineLengthù = '\0';
+
+  if (!addline(((tRuc *)Rcb->Rdc)->Rq, Rcb->Data))
+    {
+    return(RptErrorIo);
+    }
+
+  return(0);
+
+} /* RptRuWrite */
+
+
+/*--------------------------------------------------------------------*/
+
+tRptRc RptRuClose(
+ tRcb *            Rcb
+ )
+
+{
+
+  /* flush remaining data, if any */
+  if ((Rcb != 0)
+    && (Rcb->Rdc != 0)
+    && ((((tRuc *)Rcb->Rdc)->Rq->moveout) != 0)
+    && ((((tRuc *)Rcb->Rdc)->Rq->moveout->xymvblkl) != 0))
+    {
+    resprdy(((tRuc *)Rcb->Rdc)->Rq, 0);
+    waitreq(((tRuc *)Rcb->Rdc)->Rq);
+    }
+
+  /* terminate the conversation */
+  if ((Rcb != 0)
+    && (Rcb->Rdc != 0))
+    {
+    convend(((tRuc *)Rcb->Rdc)->Rq, -1, 0, 0, 0);
+    }
+
+  if (stgretn(Rcb->StgQ, sizeof(tRuc), Rcb->Rdc) != 0) /* freed ?     */
+    {
+    return(RptErrorStgretn);
+    }
+
+  return(0);
+
+} /* RptRuClose */

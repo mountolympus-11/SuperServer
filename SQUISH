@@ -1,0 +1,1231 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include "env.h"
+#include <stdio.h>
+#include <string.h>
+#include <stddef.h>
+#include <limits.h>
+#include "squish.h"
+#include "convert.h"
+
+/**** Debugging ****
+#undef INLINE
+#define INLINE
+********************/
+
+/* ****************************************************************
+
+   Function:  squish / unsquish - text compaction tables
+
+   Description:
+
+      The tables below are used to convert a subset of the EBCDIC
+      character set to and from more compact respresentations,
+      respectively.
+
+   **************************************************************** */
+
+/* ****************************************************************
+
+   Table:  TXTCODE and TXTDCOD - TEXT encoding
+
+   Description:
+
+      The TXTCODE and TXTDCOD tables provide six bit encoding and
+      decoding for 64 EBCDIC source characters; currently the
+      upper and lower case (English) alphas, zero, and the 10
+      special characters listed below.  The choices were intended
+      to support common punctuated English language sentences and
+      some expressions (SQL), that may also include limitted
+      mathematical notation and white space.
+
+
+      --- ------ ----   --- ------ ----   --- ------ ----
+      Chr EBCDIC Code   Chr EBCDIC Code   Chr EBCDIC Code
+      --- ------ ----   --- ------ ----   --- ------ ----
+
+       a    x81    1     j    x91   19     s    xA2   37
+       b    x82    3     k    x92   21     t    xA3   39
+       c    x83    5     l    x93   23     u    xA4   41
+       d    x84    7     m    x94   25     v    xA5   43
+       e    x85    9     n    x95   27     w    xA6   45
+       f    x86   11     o    x96   29     x    xA7   47
+       g    x87   13     p    x97   31     y    xA8   49
+       h    x88   15     q    x98   33     z    xA9   51
+       i    x89   17     r    x99   35
+
+       A    xC1    2     J    xD1   20     S    xE2   38
+       B    xC2    4     K    xD2   22     T    xE3   40
+       C    xC3    6     L    xD3   24     U    xE4   42
+       D    xC4    8     M    xD4   26     V    xE5   44
+       E    xC5   10     N    xD5   28     W    xE6   46
+       F    xC6   12     O    xD6   30     X    xE7   48
+       G    xC7   14     P    xD7   32     Y    xE8   50
+       H    xC8   16     Q    xD8   34     Z    xE9   52
+       I    xC9   18     R    xD9   36
+
+      NUL   x00    0     *    x5C   58
+       .    x4B   53     /    x61   59
+       ,    x6B   54     '    x7D   60
+       _    x6D   55     =    x7E   61
+       -    x60   56     $    x5B   62
+       +    x4E   57    sp    x40   63
+
+   **************************************************************** */
+
+#define z 0xff
+
+const unsigned char txtcodeíù = {
+                                                                      /*
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---
+ 0   1   2   3   4   5   6   7    8   9   A   B   C   D   E   F
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---      */
+
+00,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 0 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 1 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 2 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 3 */
+63,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 53,  z,  z, 57,  z, /* 4 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 62, 58,  z,  z,  z, /* 5 */
+56, 59,  z,  z,  z,  z,  z,  z,   z,  z,  z, 54,  z, 55,  z,  z, /* 6 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z, 60, 61,  z, /* 7 */
+ z,  1,  3,  5,  7,  9, 11, 13,  15, 17,  z,  z,  z,  z,  z,  z, /* 8 */
+ z, 19, 21, 23, 25, 27, 29, 31,  33, 35,  z,  z,  z,  z,  z,  z, /* 9 */
+ z,  z, 37, 39, 41, 43, 45, 47,  49, 51,  z,  z,  z,  z,  z,  z, /* A */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* B */
+ z,  2,  4,  6,  8, 10, 12, 14,  16, 18,  z,  z,  z,  z,  z,  z, /* C */
+ z, 20, 22, 24, 26, 28, 30, 32,  34, 36,  z,  z,  z,  z,  z,  z, /* D */
+ z,  z, 38, 40, 42, 44, 46, 48,  50, 52,  z,  z,  z,  z,  z,  z, /* E */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z  /* F */
+
+} ;
+
+const unsigned char txtdcodíù = {
+                                                                      /*
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+   0     1     2     3     4     5     6     7     8     9
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----          */
+
+ 0x00, 0x81, 0xC1, 0x82, 0xC2, 0x83, 0xC3, 0x84, 0xC4, 0x85,     /* 0 */
+ 0xC5, 0x86, 0xC6, 0x87, 0xC7, 0x88, 0xC8, 0x89, 0xC9, 0x91,     /* 1 */
+ 0xD1, 0x92, 0xD2, 0x93, 0xD3, 0x94, 0xD4, 0x95, 0xD5, 0x96,     /* 2 */
+ 0xD6, 0x97, 0xD7, 0x98, 0xD8, 0x99, 0xD9, 0xA2, 0xE2, 0xA3,     /* 3 */
+ 0xE3, 0xA4, 0xE4, 0xA5, 0xE5, 0xA6, 0xE6, 0xA7, 0xE7, 0xA8,     /* 4 */
+ 0xE8, 0xA9, 0xE9, 0x4B, 0x6B, 0x6D, 0x60, 0x4E, 0x5C, 0x61,     /* 5 */
+ 0x7D, 0x7E, 0x5B, 0x40                                          /* 6 */
+
+} ;
+
+
+/* ****************************************************************
+
+   Table:  FX_CODE and FX_DCOD - FIXCASE encoding
+
+   Description:
+
+      The FX_CODE and FX_DCOD tables are used to convert a subset
+      of the EBCDIC character set to and from more compact 5-bit
+      respresentations, respectively.  The five bit encoding
+      accomodates 32 characters; the exclusively upper or lower
+      case alphas as well as the six special characters listed
+      below.  FXUCODE and FXUDCOD encode and decode upper case
+      (mostly) alpha strings, FXLCODE and FXLDCOD are used for
+      lower case alpha strings.
+
+
+      --- ------ ----   --- ------ ----   --- ------ ----
+      Chr EBCDIC Code   Chr EBCDIC Code   Chr EBCDIC Code
+      --- ------ ----   --- ------ ----   --- ------ ----
+
+      a/A   x.1    1    j/J   x.1   10    s/S   x.2   19
+      b/B   x.2    2    k/K   x.2   11    t/T   x.3   20
+      c/C   x.3    3    l/L   x.3   12    u/U   x.4   21
+      d/D   x.4    4    m/M   x.4   13    v/V   x.5   22
+      e/E   x.5    5    n/N   x.5   14    w/W   x.6   23
+      f/F   x.6    6    o/O   x.6   15    x/X   x.7   24
+      g/G   x.7    7    p/P   x.7   16    y/Y   x.8   25
+      h/H   x.8    8    q/Q   x.8   17    z/Z   x.9   26
+      i/I   x.9    9    r/R   x.9   18
+
+      NUL   x00    0
+       .    x4B   27
+       ,    x6B   28
+       _    x6D   29
+       ?    x6F   30
+       sp   x40   31
+
+   **************************************************************** */
+
+const unsigned char fxucodeíù = {
+                                                                      /*
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---
+ 0   1   2   3   4   5   6   7    8   9   A   B   C   D   E   F
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---      */
+
+00,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 0 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 1 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 2 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 3 */
+31,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 27,  z,  z,  z,  z, /* 4 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 5 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 28,  z, 29,  z, 30, /* 6 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 7 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 8 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 9 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* A */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* B */
+ z,  1,  2,  3,  4,  5,  6,  7,   8,  9,  z,  z,  z,  z,  z,  z, /* C */
+ z, 10, 11, 12, 13, 14, 15, 16,  17, 18,  z,  z,  z,  z,  z,  z, /* D */
+ z,  z, 19, 20, 21, 22, 23, 24,  25, 26,  z,  z,  z,  z,  z,  z, /* E */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z  /* F */
+
+} ;
+
+const unsigned char fxudcodíù = {
+                                                                      /*
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+   0     1     2     3     4     5     6     7     8     9
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----          */
+
+ 0x00, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,     /* 0 */
+ 0xD1, 0XD2, 0XD3, 0XD4, 0XD5, 0XD6, 0xD7, 0xD8, 0xD9, 0xE2,     /* 1 */
+ 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0x4B, 0x6B, 0x6D,     /* 2 */
+ 0x6F, 0X40                                                      /* 3 */
+
+} ;
+
+const unsigned char fxlcodeíù = {
+                                                                      /*
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---
+ 0   1   2   3   4   5   6   7    8   9   A   B   C   D   E   F
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---      */
+
+00,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 0 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 1 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 2 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 3 */
+31,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 27,  z,  z,  z,  z, /* 4 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 5 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 28,  z, 29,  z, 30, /* 6 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 7 */
+ z,  1,  2,  3,  4,  5,  6,  7,   8,  9,  z,  z,  z,  z,  z,  z, /* 8 */
+ z, 10, 11, 12, 13, 14, 15, 16,  17, 18,  z,  z,  z,  z,  z,  z, /* 9 */
+ z,  z, 19, 20, 21, 22, 23, 24,  25, 26,  z,  z,  z,  z,  z,  z, /* A */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* B */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* C */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* D */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* E */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z  /* F */
+
+} ;
+
+const unsigned char fxldcodíù = {
+                                                                      /*
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+   0     1     2     3     4     5     6     7     8     9
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----          */
+
+ 0x00, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,     /* 0 */
+ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xA2,     /* 1 */
+ 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0x4B, 0x6B, 0x6D,     /* 2 */
+ 0x6F, 0X40                                                      /* 3 */
+
+} ;
+
+
+/* ****************************************************************
+
+   Table:  DIGCODE and DIGDCOD - DIGIT encoding
+
+   Description:
+
+      The DIGCODE and DIGDCOD tables are used to convert a subset
+      of the EBCDIC character set to and from more compact 4-bit
+      respresentations, respectively.  The four bit encoding
+      accomodates 16 characters; the decimal digits and the six
+      special characters listed below.  The choices were intended
+      to support integers, decimal numbers, dates, times and
+      surrounding white space.
+
+
+      --- ------ ----   --- ------ ----
+      Chr EBCDIC Code   Chr EBCDIC Code
+      --- ------ ----   --- ------ ----
+
+       0    xF0    0     .    x4B   10
+       1    xF1    1     ,    x6B   11
+       2    xF2    2     :    x7A   12
+       3    xF3    3     /    x61   13
+       4    xF4    4     $    x5B   14   (US specific, oh well)
+       5    xF5    5    sp    x40   15
+       6    xF6    6
+       7    xF7    7
+       8    xF8    8
+       9    xF9    9
+
+   **************************************************************** */
+
+const unsigned char digcodeíù = {
+                                                                      /*
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---
+ 0   1   2   3   4   5   6   7    8   9   A   B   C   D   E   F
+--- --- --- --- --- --- --- ---  --- --- --- --- --- --- --- ---      */
+
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 0 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 1 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 2 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 3 */
+15,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 10,  z,  z,  z,  z, /* 4 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z, 14,  z,  z,  z,  z, /* 5 */
+ z, 13,  z,  z,  z,  z,  z,  z,   z,  z,  z, 11,  z,  z,  z,  z, /* 6 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z, 12,  z,  z,  z,  z,  z, /* 7 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 8 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* 9 */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* A */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* B */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* C */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* D */
+ z,  z,  z,  z,  z,  z,  z,  z,   z,  z,  z,  z,  z,  z,  z,  z, /* E */
+ 0,  1,  2,  3,  4,  5,  6,  7,   8,  9,  z,  z,  z,  z,  z,  z  /* F */
+
+} ;
+
+const unsigned char digdcodíù = {
+                                                                      /*
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+   0     1     2     3     4     5     6     7     8     9
+ ----- ----- ----- ----- ----- ----- ----- ----- ----- -----          */
+
+ 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9,     /* 0 */
+ 0x4B, 0X6B, 0X7A, 0X61, 0X5B, 0X40                              /* 1 */
+
+} ;
+
+#undef z
+
+
+/* ****************************************************************
+
+   Function:  squish - block compact
+
+   Description:
+
+      SQUISH and USQUISH may be used to compact and uncompact a
+      block of data.  SQUISH operates by replacing sequences of
+      source characters with a more compact structure, building an
+      encoded representation of the source data in a work area
+      provided by the caller.  USQUISH reverses the process by
+      uncompacting the encoded text; also in a work area provided
+      by the caller.
+
+      SQUISH attempts to construct a compacted version of the
+      source text in the buffer described by *cmp/cmplen. Usually,
+      you should provide an area equal in size to the source
+      buffer.  If the compaction is effective, i.e. the source text
+      contains enough compactable sequences to absorb the cost of
+      the encoding, an area of that size is more than sufficient.
+      However, a smaller result is not guaranteed.  If the return
+      buffer is too small to contain the result SQUISH returns a
+      negative value.  Otherwise, it returns the number of bytes
+      occupied by the encoded result.  The size of the source data
+      buffer is maintained in the SQ_HDR_UNSQUISH field of the
+      compacted result.  Use this value to allocate a return area
+      for USQUISH.  If the return area provided is too small,
+      USQUISH will return a negative value to indicate the error.
+
+   Parameters:
+
+      char  *txt    - text block origin
+      short txtlen  - text block length
+      char  *cmp    - compacted block origin
+      short cmplen  - compacted block length
+      char  level   - algorithm level (SQ_LEVELn)
+
+   Returns:
+
+      size of squished block
+
+   **************************************************************** */
+
+int squish(
+    char  *txt,
+    short txtlen,
+    char  *cmp,
+    short cmplen,
+    char  level )
+
+{
+    int    length, type, size, chrwidth ;
+    int    passed_txtlen ;
+    int    used, hdrlen, maxlen ;
+    int    tinylen, stdlen, biglen ;   /* LEVEL2 eunit pfx lengths   */
+    unsigned short convlen ;           /* platform conversion area   */
+
+    char const *encoder ;
+    char *p ;
+
+    struct squish_header *sqhdrp ;     /* compaction block header    */
+    struct squish_header_extension *sqhdrx ;  /* header extension    */
+
+    struct squish_entry  *sqentp ;     /* LEVEL0 encoding unit pfx   */
+    sSq_Extent *sqextent ;             /* LEVEL1 encoding unit xtnd  */
+    struct sq_encoding_unit_pfx *eu ;  /* LEVEL2 encoding unit pfx   */
+
+/*  ---------------------------------------------------------------
+    Common initialization
+    --------------------------------------------------------------- */
+
+    passed_txtlen = txtlen ;
+
+    size   = sizeof( struct squish_header ) ;
+    sqhdrp = (struct squish_header *) cmp ;
+    sqhdrx = 0 ;
+
+    if ( level >= SQ_LEVEL2 )  {
+        sqhdrx  = (struct squish_header_extension *) ( cmp + size ) ;
+        size   += sizeof( struct squish_header_extension ) ;
+    }
+
+    sqentp = (struct squish_entry *) ( cmp + size ) ;
+
+    if ( level >= SQ_LEVEL1 )  {
+        hdrlen = sizeof( struct squish_extent ) ;
+        maxlen = SHRT_MAX ;
+    }
+    else  {
+        hdrlen = sizeof( struct squish_entry ) ;
+        maxlen = UCHAR_MAX ;
+    }
+
+/*  ***************************************************************
+
+     LEVEL0, LEVEL1 - acquire source strings, build encoding units
+
+    *************************************************************** */
+
+    if ( level <= SQ_LEVEL1 )  {
+
+        for ( ; txtlen > 0 ; txt += used, txtlen -= used )  {
+
+            used = sqstrloc( txt, txtlen, maxlen ) ;
+
+            if ( used >= 0 )  {
+                type   = SQ_TYPE_STRING ;
+                length = used ;
+            }
+            else  {
+                type   = SQ_TYPE_REPEAT ;
+                used   = -used ;
+                length = 1 ;
+            }
+
+/*          -------------------------------------------------------
+            Construct the encoding unit prefix
+            ------------------------------------------------------- */
+
+            hdrlen = ( used > UCHAR_MAX )
+                ? SQ_EXTENT_LEN
+                : sizeof( struct squish_entry ) ;
+
+            size += hdrlen + length ;
+
+            if ( cmplen < size )
+                break ;
+
+            sqentp->sq_len   = used ;
+            sqentp->sq_type  = type ;
+
+            if ( used > UCHAR_MAX )  {
+                sqextent         = (sSq_Extent *) sqentp ;
+                sqentp->sq_len   = 0 ;
+                sqextent->sq_len = used ;
+
+                if ( NUMERIC_CONVERT )
+                    convshrt( &sqextent->sq_len ) ;
+            }
+
+            memcpy( (char*)sqentp + hdrlen, txt, length ) ;
+            sqentp = (struct squish_entry *) (cmp + size) ;
+        }
+    }
+
+/*  ***************************************************************
+
+     LEVEL2 - acquire source strings, build encoding units
+
+    *************************************************************** */
+
+    else  {
+        eu = (struct sq_encoding_unit_pfx *) sqentp ;
+
+        for ( ; txtlen > 0 ; txt += used, txtlen -= used )  {
+
+            type = sqstrlo2( txt, txtlen, maxlen, &used ) ;
+
+            if ( type == SQ_TYPE_STRING )
+                length = used ;
+
+            else if ( type == SQ_TYPE_TEXT )
+                length = sqsize( used, SQ_TEXT_BITS ) ;
+
+            else if ( type == SQ_TYPE_FIXU || type == SQ_TYPE_FIXL )
+                length = sqsize( used, SQ_FIXED_BITS ) ;
+
+            else if ( type == SQ_TYPE_DIGIT )
+                length = sqsize( used, SQ_DIGIT_BITS ) ;
+
+            else if ( type == SQ_TYPE_REPEAT )
+                length = 1 ;
+
+/*          -------------------------------------------------------
+            Compute encoding unit prefix length - validate buffer
+            ------------------------------------------------------- */
+
+            tinylen = stdlen = biglen = 0 ;
+
+            if ( used < 32 )  {
+                hdrlen  = eupfx_tiny ;
+                tinylen = used ;
+            }
+            else if ( used <= UCHAR_MAX )  {
+                hdrlen  = eupfx_std ;
+                stdlen  = used ;
+            }
+            else  {
+                hdrlen  = eupfx_large ;
+                biglen  = used ;
+            }
+
+            size += hdrlen + length ;
+
+            if ( cmplen < size )
+                break ;
+
+/*          -------------------------------------------------------
+            Construct encoding unit prefix
+            ------------------------------------------------------- */
+
+            eu->typ3len5 = (type << 5) | tinylen ;
+
+            if ( stdlen )
+                eu->stdlen = stdlen ;
+
+            else if ( biglen )  {
+                eu->stdlen = 0 ;
+                convlen    = biglen ;
+                if ( NUMERIC_CONVERT ) convshrt( &convlen ) ;
+                memcpy( &eu->biglen, &convlen, 2 ) ;
+            }
+
+/*          ---------------------------------------------------------
+            Load the result buffer
+            --------------------------------------------------------- */
+
+            p = (char *) eu + hdrlen ;
+
+            if ( type == SQ_TYPE_REPEAT || type == SQ_TYPE_STRING )
+                memcpy( p, txt, length ) ;
+
+            else  {
+                if ( type == SQ_TYPE_TEXT )  {
+                    chrwidth = SQ_TEXT_BITS ;
+                    encoder  = txtcode ;
+                }
+
+                else if ( type == SQ_TYPE_FIXU )  {
+                    chrwidth = SQ_FIXED_BITS ;
+                    encoder  = fxucode ;
+                }
+
+                else if ( type == SQ_TYPE_FIXL )  {
+                    chrwidth = SQ_FIXED_BITS ;
+                    encoder  = fxlcode ;
+                }
+
+                else if ( type == SQ_TYPE_DIGIT )  {
+                    chrwidth = SQ_DIGIT_BITS ;
+                    encoder  = digcode ;
+                }
+
+                pack( p, txt, used, chrwidth, encoder ) ;
+            }
+
+            eu = (struct sq_encoding_unit_pfx *) (cmp + size) ;
+        }
+    }
+
+
+/* ******************************************************************
+
+    Complete the compaction buffer header and return
+
+   ****************************************************************** */
+
+    if ( cmplen < size )
+        return -1 ;
+
+    sqhdrp->sq_hdr_squish   = size ;
+    sqhdrp->sq_hdr_unsquish = passed_txtlen ;
+
+    if ( sqhdrx )  {
+        sqhdrx->level = level ;
+        sqhdrx->id    = 0xff ;
+    }
+
+    return size ;
+}
+
+
+/* ****************************************************************
+
+   Function:  sqstrloc - LEVEL0 get encoding unit type and length
+
+   Description:
+
+      This function locates the next substring from *str that
+      is either a repeating group or a block of characters
+      immediately followed by a repeating group.  A maximum
+      string size may be specified to limit the length of the
+      returned string.
+
+      The function returns the length of repeating group as a
+      negative number.  A positive number conveys the length of
+      a substring other than a repeating group.
+
+   **************************************************************** */
+
+int sqstrloc( char *str, int len, int maxstring )  {
+
+    char c, *p, *rptorg ;
+    int  rptsize = 0 ;
+    int  RptGrpLen = 4 ;
+
+    if ( len <= 0 )             /*validate source string length */
+        return 0 ;
+
+    if ( maxstring && len > maxstring) /*max size of returnd string */
+        len = maxstring ;
+
+    p = str ;
+
+    while ( len && rptsize < RptGrpLen ) {
+
+        for ( ; (len > 1 ) && (*p != *(p+1)) ; p++, len-- ) ;
+
+        rptorg = p ;
+        c = *p ;
+
+        for ( ; len && (*p == c) ; p++, len-- ) ;
+        rptsize = p - rptorg ;
+    }
+
+    if ( rptsize < RptGrpLen )
+        return rptorg - str + rptsize ;
+
+    return ( str == rptorg ) ? -rptsize : rptorg - str ;
+}
+
+
+/* ****************************************************************
+
+   Function:  sqstrlo2 - LEVEL2 get encoding unit type and length
+
+   Description:
+
+      This function identifies the largest initial substring of STR
+      that can be used to form the most compact encoding unit.  A
+      maximum string size may be specified to limit the length of
+      the returned string.
+
+   Returns:
+
+      The function returns an int substring type of either
+
+         SQ_TYPE_STRING  - untyped string
+         SQ_TYPE_TEXT    - text string
+         SQ_TYPE_FIXU    - upper case alpha string
+         SQ_TYPE_FIXL    - lower case alpha string
+         SQ_TYPE_DIGIT   - digit string
+         SQ_TYPE_REPEAT  - repeating char
+
+      Whenever *RETLEN is greater than zero, that number of leading
+      STR bytes can be used to build an encoding unit of the
+      indicated type.
+
+   **************************************************************** */
+
+int sqstrlo2(         /* out: type of initial substring      HPNS   */
+    unsigned char *str,      /* in:  string origin                  */
+    int  len,                /* in:  length of string               */
+    int  maxstring,          /* in:  max length of string returned  */
+    int  *retlen )           /* out: length of string returned      */
+
+{
+    int  lenaux ;
+    int  GrpSize, GrpType ;
+    int  FirstIsTxt, FirstIsDig, FirstIsFxU, FirstIsFxL ;
+
+    char *RptGrpOrg, *TxtGrpOrg, *DigGrpOrg, *FixGrpOrg ;
+    unsigned char *p, *paux ;
+    unsigned char c ;
+
+    if ( len <= 0 )
+        return ( *retlen = 0 ) ;
+
+    if ( maxstring && len > maxstring )
+        len = maxstring ;
+
+    RptGrpOrg = TxtGrpOrg = DigGrpOrg = FixGrpOrg = 0 ;
+
+/* ------------------------------------------------------------------
+    P is a pointer to the end of the initial substring when either
+    LEN goes to zero, or when a terminating substring is found
+    that should or must be represented another way.
+
+    FIRSTISxxx is true or false depending on whether STR begins
+    with a character that is a member of the associated encoding
+    character set.  That status may be revoked later if the
+    substring is found to be too small to warrant special handling.
+    ----------------------------------------------------------------- */
+
+    FirstIsTxt = isqtext(*str) ;
+    FirstIsFxU = isqfixU(*str) ;
+    FirstIsFxL = isqfixL(*str) ;
+    FirstIsDig = isqdigit(*str) ;
+
+/* ------------------------------------------------------------------
+    Identify the next encoding unit
+
+    Scan the string for a terminating substring in what is usually
+    the most desirable order of outcome; i.e. a repeating character
+    can be represented more compactly than text and, in turn, more
+    compactly than an untyped string, etc.
+
+    Identify leading repeater arrays outside of main loop.
+    ----------------------------------------------------------------- */
+
+    lenaux = len ;
+    c      = *str ;
+
+    for ( p = str + 1 ; --lenaux && (c == *p) ; p++ ) ;
+
+    GrpSize = p - str ;
+
+    if ( GrpSize >= RptGrpLen )
+        RptGrpOrg = str ;
+
+    else  {
+        for ( p = str + 1 ; --len ; p++ )  {
+            c = *p ;
+
+/*      ------------------------------------------------------------
+         trailing REPEATing charíù
+        ------------------------------------------------------------- */
+
+            paux   = p + 1 ;
+            lenaux = len - 1 ;
+
+            if ( lenaux >= RptGrpLen )
+                lenaux = RptGrpLen - 1 ;
+
+            for ( ; lenaux-- && (c == *paux) ; paux++ ) ;
+
+            GrpSize = paux - p ;
+
+            if ( GrpSize >= RptGrpLen )  {
+                RptGrpOrg = p ;
+                break ;
+            }
+
+/*        -----------------------------------------------------------
+            leading or trailing DIGIT sequence
+          ----------------------------------------------------------- */
+
+            if ( FirstIsDig != isqdigit(c) )  {
+
+                if ( FirstIsDig )  {
+                    GrpSize = p - str ;
+
+                    if ( GrpSize >= DigGrpLen )  {
+                        DigGrpOrg = str ;
+                        break ;
+                    }
+
+                    FirstIsDig = FALSE ;
+                }
+
+                else  {
+                    paux   = p + 1 ;
+                    lenaux = len - 1 ;
+
+                    if ( lenaux >= DigGrpLen )
+                        lenaux = DigGrpLen - 1 ;
+
+                    for ( ; lenaux-- && isqdigit(*paux) ; paux++ ) ;
+
+                    GrpSize = paux - p ;
+
+                    if ( GrpSize >= DigGrpLen )  {
+                        DigGrpOrg = p ;
+                        break ;
+                    }
+                }
+            }
+
+/*         ----------------------------------------------------------
+            leading or trailing FIXCASE LOWER sequence
+           ---------------------------------------------------------- */
+
+            if ( FirstIsFxL != isqfixL(c) )  {
+
+                if ( FirstIsFxL )  {
+                    GrpSize = p - str ;
+
+                    if ( GrpSize >= FixGrpLen )  {
+                        FixGrpOrg = str ;
+                        break ;
+                    }
+
+                    FirstIsFxL = FALSE ;
+                }
+
+                else  {
+                    paux   = p + 1 ;
+                    lenaux = len - 1 ;
+
+                    if ( lenaux >= FixGrpLen )
+                        lenaux = FixGrpLen - 1 ;
+
+                    for ( ; lenaux-- && isqfixL(*paux) ; paux++ ) ;
+
+                    GrpSize = paux - p ;
+
+                    if ( GrpSize >= FixGrpLen )  {
+                        FixGrpOrg = p ;
+                        break ;
+                    }
+                }
+            }
+
+/*         -----------------------------------------------------------
+            leading or trailing FIXCASE UPPER sequence
+           ---------------------------------------------------------- */
+
+            if ( FirstIsFxU != isqfixU(c) )  {
+
+                if ( FirstIsFxU )  {
+                    GrpSize = p - str ;
+
+                    if ( GrpSize >= FixGrpLen )  {
+                        FixGrpOrg = str ;
+                        break ;
+                    }
+
+                    FirstIsFxU = FALSE ;
+                }
+
+                else  {
+                    paux   = p + 1 ;
+                    lenaux = len - 1 ;
+
+                    if ( lenaux >= FixGrpLen )
+                        lenaux = FixGrpLen - 1 ;
+
+                    for ( ; lenaux-- && isqfixU(*paux) ; paux++ ) ;
+
+                    GrpSize = paux - p ;
+
+                    if ( GrpSize >= FixGrpLen )  {
+                        FixGrpOrg = p ;
+                        break ;
+                    }
+                }
+            }
+
+/*         ----------------------------------------------------------
+            leading or trailing TEXT sequence
+           ---------------------------------------------------------- */
+
+            if ( FirstIsTxt != isqtext(c) )  {
+
+                if ( FirstIsTxt )  {
+                    GrpSize = p - str ;
+
+                    if ( GrpSize >= TxtGrpLen )  {
+                        TxtGrpOrg = str ;
+                        break ;
+                    }
+
+                    FirstIsTxt = FALSE ;
+                }
+
+                else  {
+                    paux   = p + 1 ;
+                    lenaux = len - 1 ;
+
+                    if ( lenaux >= TxtGrpLen )
+                        lenaux = TxtGrpLen - 1 ;
+
+                    for ( ; lenaux-- && isqtext(*paux) ; paux++ ) ;
+
+                    GrpSize = paux - p ;
+
+                    if ( GrpSize >= TxtGrpLen )  {
+                        TxtGrpOrg = p ;
+                        break ;
+                    }
+                }
+            }
+        }
+    }
+
+/* ------------------------------------------------------------------
+    Encoding unit identified
+
+    RETLEN is set to the number of leading STR bytes that are
+    consistent with the returned eu type.  The origin tests are
+    needed because an encoding unit can be selected either on its
+    merits alone (its a big repeater or long text), or because it is
+    followed by a string that benifits from unique representation.
+    ----------------------------------------------------------------- */
+
+    if ( RptGrpOrg == str )  {
+        GrpType = SQ_TYPE_REPEAT ;
+        *retlen = GrpSize ;
+    }
+
+    else if ( DigGrpOrg == str )  {
+        GrpType = SQ_TYPE_DIGIT ;
+        *retlen = GrpSize ;
+    }
+
+    else if ( TxtGrpOrg == str )  {
+        GrpType = SQ_TYPE_TEXT ;
+        *retlen = GrpSize ;
+    }
+
+    else if ( FixGrpOrg == str )  {
+        if ( FirstIsFxU )
+            GrpType = SQ_TYPE_FIXU ;
+        else
+            GrpType = SQ_TYPE_FIXL ;
+
+        *retlen = GrpSize ;
+    }
+
+    else  {
+        *retlen = p - str ;
+
+        if ( FirstIsDig )
+            GrpType = SQ_TYPE_DIGIT ;
+
+        else if ( FirstIsFxU )
+            GrpType = SQ_TYPE_FIXU ;
+
+        else if ( FirstIsFxL )
+            GrpType = SQ_TYPE_FIXL ;
+
+        else if ( FirstIsTxt )
+            GrpType = SQ_TYPE_TEXT ;
+
+        else
+            GrpType = SQ_TYPE_STRING ;
+    }
+
+    return GrpType ;
+}
+
+
+/* ****************************************************************
+
+   Functions:  usquish - block uncompact
+
+   Description:
+
+      Refer to SQUISH
+
+   Notes:
+
+      USQUISH can uncompact a SQUISH compaction produced for any
+      algorithm of an equal or lower SQUISH rev.
+
+   Parameters:
+
+      char  *txt    - text block origin
+      short txtlen  - text block length
+      char  *cmp    - compacted block origin
+      short cmplen  - compacted block length
+
+   Returns:
+
+      size of unsquished block
+
+   **************************************************************** */
+
+int usquish(
+    char  *cmp,
+    short cmplen,
+    char  *txt,
+    short txtlen )
+
+{
+    int    slen, totlen, size, reqlen, entlen, hdrlen;
+    int    retsize ;
+    int    type, lvl2plus, chrwidth ;
+    char   *source ;
+    char const *decoder ;
+    unsigned short convlen ;           /* platform conversion area   */
+
+    struct squish_header *sqhdrp ;     /* compaction block header    */
+    struct squish_header_extension *sqhdrx ;
+
+    struct squish_entry  *sqentp ;     /* LEVEL0 encoding unit pfx   */
+    sSq_Extent *sqextent ;             /* LEVEL1 encoding unit xtnd  */
+    struct sq_encoding_unit_pfx *eu ;  /* LEVEL2 encoding unit pfx   */
+
+/*  ---------------------------------------------------------------
+     Common initialization
+    --------------------------------------------------------------- */
+
+    size   = sizeof( struct squish_header ) ;
+    sqhdrp = (struct squish_header*) cmp ;
+    sqhdrx = (struct squish_header_extension *) ( cmp + size ) ;
+
+    if ( sqhdrx->id != 0xFF )
+        lvl2plus = FALSE ;
+
+    else  {
+        lvl2plus = TRUE ;
+        size += sizeof( struct squish_header_extension ) ;
+    }
+
+    sqentp = (struct squish_entry *) ( cmp + size ) ;
+
+    reqlen = sqhdrp->sq_hdr_unsquish ;
+    totlen = sqhdrp->sq_hdr_squish - size ;
+
+    if ( reqlen > txtlen )
+        return -1 ;
+
+    while( totlen > 0 )  {
+
+/*      -----------------------------------------------------------
+        Breakdown LEVEL1 encoding unit
+        ----------------------------------------------------------- */
+
+        if ( lvl2plus == FALSE )  {
+            hdrlen = SQ_STRING_squish_entry ;
+            slen   = sqentp->sq_len ;
+            type   = sqentp->sq_type ;
+
+            if ( ! slen )  {
+                hdrlen   = SQ_EXTENT_LEN ;
+                sqextent = (sSq_Extent *) sqentp ;
+
+                if ( NUMERIC_CONVERT )
+                    convshrt( &sqextent->sq_len ) ;
+
+                slen = sqextent->sq_len ;
+            }
+
+            source = (char*) sqentp + hdrlen ;
+        }
+
+/*      -----------------------------------------------------------
+        Breakdown LEVEL2 encoding unit
+        ----------------------------------------------------------- */
+
+        else  {
+            eu   = (struct sq_encoding_unit_pfx *) sqentp ;
+            type = eu->typ3len5 >> 5 ;
+            slen = eu->typ3len5 & 0x1f ;
+
+            if ( slen )
+                hdrlen = eupfx_tiny ;
+
+            else if ( eu->stdlen )  {
+                hdrlen = eupfx_std ;
+                slen   = eu->stdlen ;
+            }
+
+            else  {
+                hdrlen  = eupfx_large ;
+                memcpy( &convlen, &eu->biglen, 2 ) ;
+                if ( NUMERIC_CONVERT ) convshrt( &convlen ) ;
+                slen = convlen ;
+            }
+
+            source = (char*) eu + hdrlen ;
+        }
+
+/*      -----------------------------------------------------------
+        Decode the encoding unit and insert result in return area
+        ----------------------------------------------------------- */
+
+        if ( (txtlen -= slen) < 0 )
+            return -1 ;
+
+        if ( type == SQ_TYPE_STRING )     {
+            memcpy( txt, source, slen ) ;
+            entlen = hdrlen + slen ;
+        }
+
+        else if ( type == SQ_TYPE_REPEAT )  {
+            memset( txt, *source, slen ) ;
+            entlen = hdrlen + 1 ;
+        }
+
+        else  {
+            if ( type == SQ_TYPE_TEXT )  {
+                chrwidth = SQ_TEXT_BITS ;
+                decoder  = txtdcod ;
+            }
+
+            else if ( type == SQ_TYPE_FIXU )  {
+                chrwidth = SQ_FIXED_BITS ;
+                decoder  = fxudcod ;
+            }
+
+            else if ( type == SQ_TYPE_FIXL )  {
+                chrwidth = SQ_FIXED_BITS ;
+                decoder  = fxldcod ;
+            }
+
+            else if ( type == SQ_TYPE_DIGIT )  {
+                chrwidth = SQ_DIGIT_BITS ;
+                decoder  = digdcod ;
+            }
+
+            retsize = unpack( txt, source, slen, chrwidth, decoder ) ;
+            entlen  = hdrlen + retsize ;
+        }
+
+/*      -----------------------------------------------------------
+        Advance to next encoding unit
+        ----------------------------------------------------------- */
+
+        sqentp   = (struct squish_entry *) ((char *) sqentp + entlen) ;
+        totlen  -= entlen ;
+        txt     += slen ;
+    }
+
+    return reqlen ;
+}
+
+
+/* ****************************************************************
+
+   Function:  pack - n-bit encoding of character string
+
+   Description:
+
+      This routine accepts a character string and produces an
+      n-bit encoding - each input character contributing n < 8
+      bits to the target buffer.  The translation is done using
+      the encoder table provided as input.
+
+   Returns:
+
+      N/A
+
+   **************************************************************** */
+
+void pack(                                                   /*HPNS*/
+    unsigned char *target,   /* out: encoded result return area     */
+    unsigned char *source,   /* in:  source string origin           */
+    int  length,             /* in:  length of source string > 0    */
+    int  chrwidth,           /* in:  bit width of encoded char      */
+    const char *encoder )    /* in:  encoding table                 */
+
+{
+    int  n ;                 /* shift calculation                   */
+    int  ub ;                /* unpopulated rightmost bits of target*/
+
+    *target = 0 ;            /* length > 0 is an entry requirement  */
+
+    for ( ub = 8 ; length-- ; source++ )  {
+
+        if ( (n = ub - chrwidth) >= 0 )  {
+            *target |= encoderí*sourceù << n ;
+            ub = n ;
+        }
+
+        else  {
+            n  = -n ;
+            *target  |= encoderí*sourceù >> n ;
+            ub = 8 - n ;
+            *++target = encoderí*sourceù << ub ;
+        }
+    }
+}
+
+
+/* ****************************************************************
+
+   Function:  unpack - decode n-bit encoded string
+
+   Description:
+
+      This routine accepts a string of characters where each
+      character is represented by an n-bit (n < 8) encoding.
+      The appropriate 8-bit code point is recovered using the
+      passed decoder table.
+
+   Returns:
+
+      The length of the 8-bit encoded TARGET area
+
+   **************************************************************** */
+
+int unpack(           /* out: length of target area used      HPNS  */
+    unsigned char *target,   /* out: result return area             */
+    unsigned char *source,   /* in:  encoded source string origin   */
+    int  count,              /* in:  number of characters encoded   */
+    int  chrwidth,           /* in:  bit width of encoded char      */
+    const char *decoder )    /* in:  decoding table                 */
+
+{
+    static int maskíù =      /* masks delete spurious high order bits */
+               { 0, 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff } ;
+
+    int  n ;                 /* shift calculation                   */
+    int  ub ;                /* unreturned rightmost bits of source */
+    int  ndx ;               /* index into decoder array            */
+
+    int source_len = sqsize( count, chrwidth ) ;
+
+    for ( ub = 8 ; count-- ; target++ )  {
+
+        if ( (n = ub - chrwidth) >= 0 )  {
+            ndx = *source >> n ;
+            ub  = n ;
+        }
+
+        else  {
+            n    = - n ;
+            ndx  = *source << n ;
+            ub   = 8 - n ;
+            ndx |= *++source >> ub ;
+        }
+
+        *target = decoderíndx & maskíchrwidthùù ;
+    }
+
+    return ( source_len ) ;
+}

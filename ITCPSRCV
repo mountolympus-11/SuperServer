@@ -1,0 +1,419 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*********************************************************************/
+/* TCP/IP SuperServer Part 2                                         */
+/*********************************************************************/
+/* Maintenance:                                                      */
+/*    01/23/96 Randy Witek - make ITCPACLOS the default application  */
+/*********************************************************************/
+
+/*-------------------------------------------------------------------*/
+/* Compile-time definitions                                          */
+/*-------------------------------------------------------------------*/
+
+/* none */
+
+/*-------------------------------------------------------------------*/
+/* Header Files                                                      */
+/*-------------------------------------------------------------------*/
+
+#include "tcpincl.h"
+#include "sockincl.h"
+#include "env.h"
+#include "msg.h"
+#include "stgmgr.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*-------------------------------------------------------------------*/
+/* Internal Function Prototypes                                      */
+/*-------------------------------------------------------------------*/
+
+static void logmsg
+            (
+            char                   *message,
+            int                     msgnum
+            );
+
+static void tcpenmsg
+            (
+            char                   *tcp_functionname,
+            int                     tcp_errno
+            );
+
+/*********************************************************************/
+/* Function: ITCPSRCV - Integrator SuperServer Part 2                */
+/*********************************************************************/
+
+void   ITCSRCV(          char     *parm_applname,
+                         long int *parm_length,
+                         char     *parm_string,
+                unsigned long int *parm_socket,
+                unsigned long int *parm_port,
+                unsigned long int *parm_hostaddr)
+
+{
+
+/*-------------------------------------------------------------------*/
+/* variable declarations                                             */
+/*-------------------------------------------------------------------*/
+
+unsigned char               bufí24ù;
+unsigned char               dotformí16ù;
+unsigned char               applnameí9ù;
+unsigned char               newentí8ù;
+unsigned char               msg_bufferí120ù;
+int                         rc;
+int                         s;
+int                         ssocket;
+int                         sread;
+int                         swrite;
+int                         sexceptions;
+int                         stimeout;
+int                         error_value;
+int                         namelen;
+int                         dotlen;
+struct sockaddr_in          client;
+struct sockaddr_in        callback;
+
+/*-------------------------------------------------------------------*/
+/* BEGIN EXECUTION                                                   */
+/*-------------------------------------------------------------------*/
+
+sprintf(msg_buffer, "SuperServer ITCPSRCV: starting\n");
+logmsg(msg_buffer,901);
+
+/* Obtain the given socket descriptor & default application name/type*/
+/*-------------------------------------------------------------------*/
+
+memcpy(&s,parm_socket,4);
+strcpy(applname,"ITCPCLOS");
+
+sprintf(msg_buffer, "SuperServer ITCPSRCV: socket %d will be used\n",
+   s);
+logmsg(msg_buffer,901);
+
+/* Obtain addressing family and address of client                    */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: issuing getpeername\n",0);
+
+namelen = sizeof(client);
+
+if (getpeername(s, (struct sockaddr *)&client, &namelen) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("GETPEERNAME",error_value);
+    goto abort_socket;
+  }
+
+dotlen = sizeof(dotform);
+if (inet_ntoax(&client.sin_addr, &dotformí0ù, &dotlen) < 0)
+  {
+    error_value = 0;
+    tcpenmsg("INET_NTOAX",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSRCV: client host(%s) port(%d) family(%d)\n",
+   dotform, client.sin_port, client.sin_family);
+logmsg(msg_buffer,901);
+
+/* Issue select to wait for data                                     */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: issuing select(read)\n",0);
+
+ssocket     = s;
+sread       = 1;
+swrite      = 0;
+sexceptions = 0;
+stimeout    = 0;
+
+rc = select(&ssocket, sread, swrite, sexceptions, stimeout);
+if (rc < 1)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SELECT",error_value);
+    goto abort_socket;
+  }
+
+/* Peek at the data from the client                                  */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: issuing recv(peek)\n",0);
+
+rc = recv(s, buf, sizeof(buf), MSG_PEEK);
+if (rc < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("RECV",error_value);
+    goto abort_socket;
+  }
+if (rc != 24)
+  {
+    logmsg("SuperServer ITCPSRCV: less than 24 bytes received\n",901);
+    goto pass_socket;
+  }
+
+/* If the data is not the SuperServer message...start default appl   */
+/*-------------------------------------------------------------------*/
+
+if (memcmp(buf,"ITCPSSRV",8) != 0)
+  {
+    logmsg("SuperServer ITCPSRCV: not SuperServer message\n",901);
+    goto pass_socket;
+  }
+
+/* Receive the SuperServer message to get the data out of the queue  */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: issuing recv\n",0);
+
+rc = recv(s, buf, sizeof(buf), 0);
+if (rc < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("RECV",error_value);
+    goto abort_socket;
+  }
+if (rc != 24)
+  {
+    goto abort_socket;
+  }
+
+/* Extrace the callback information from the SuperServer message     */
+/*-------------------------------------------------------------------*/
+
+memcpy(&callback.sin_family, &bufí16ù, 2);
+memcpy(&callback.sin_port, &bufí18ù, 2);
+memcpy(&callback.sin_addr, &bufí20ù, 4);
+
+/* If a default application was given...use the given applname       */
+/*-------------------------------------------------------------------*/
+
+if (memcmp(&bufí8ù," ",1) >0)
+  {
+    memcpy(&applnameí0ù,&bufí8ù,8);
+  }
+
+/* If no port was specified for callback...accept client as is       */
+/*-------------------------------------------------------------------*/
+
+if (callback.sin_port == 0)
+  {
+    goto pass_socket;
+  }
+
+/* Supply addressing family and address of client if ommitted in msg */
+/*-------------------------------------------------------------------*/
+
+if (callback.sin_family == 0)
+  {
+    callback.sin_family = client.sin_family;
+  }
+
+if (callback.sin_addr.s_addr == INADDR_ANY)
+  {
+    callback.sin_addr = client.sin_addr;
+  }
+
+/* Shutdown and close the connection to the client                   */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: Issuing shutdown\n",0);
+
+if (shutdown(s, SOCK_SHUTDOWN_SENDRECEIVE) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SHUTDOWN",error_value);
+    goto abort_socket;
+  }
+
+logmsg("SuperServer ITCPSRCV: issuing close\n",0);
+
+if (close(s) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("CLOSE",error_value);
+    goto abort_socket;
+  }
+
+/* Allocate a new socket for the callback to the client              */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSRCV: issuing socket\n",0);
+
+if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SOCKET",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSRCV: socket %d will be used for callback\n",s);
+logmsg(msg_buffer,901);
+
+/* Callback the client                                               */
+/*-------------------------------------------------------------------*/
+
+dotlen = sizeof(dotform);
+if (inet_ntoax(&callback.sin_addr, &dotformí0ù, &dotlen) < 0)
+  {
+    error_value = 0;
+    tcpenmsg("INET_NTOAX",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSRCV: callback host(%s) port(%d) family(%d)\n",
+   dotform, callback.sin_port, callback.sin_family);
+logmsg(msg_buffer,901);
+
+logmsg("SuperServer ITCPSRCV: issuing connect\n",0);
+
+if (connect(s, (struct sockaddr *)&callback, sizeof(callback)) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("CONNECT",error_value);
+    goto abort_socket;
+  }
+
+/* Pass the socket                                                   */
+/*-------------------------------------------------------------------*/
+
+pass_socket:
+
+logmsg("SuperServer ITCPSRCV: issuing givesocket\n",0);
+
+if (givesocket(s) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("GIVESOCKET",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+        "SuperServer ITCPSRCV: issuing start_application for %s",
+        applname);
+
+logmsg(msg_buffer,901);
+
+start_application(    applname,                /*&appl name      */
+                      0,                       /*&no parmlength  */
+                      0,                       /*&no parmstring  */
+                      0,                       /*&workunit type  */
+                      0,                       /*&port           */
+                      0,                       /*&host address   */
+                      &s,                      /*&socket#        */
+                      0,                       /*&socket token   */
+                      newent,                  /*&ent tkn return */
+                      &rc);                    /*&retcode return */
+
+if (rc != 0)
+  {
+    tcpenmsg("START_APPLICATION",rc);
+    goto abort_socket;
+  }
+
+logmsg("SuperServer ITCPSRCV: issuing select(exceptions)\n",0);
+
+ssocket     = s;
+sread       = 0;
+swrite      = 0;
+sexceptions = 1;
+stimeout    = 0;
+
+rc = select(&ssocket, sread, swrite, sexceptions, stimeout);
+if (rc < 1)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SELECT",error_value);
+    goto abort_socket;
+  }
+
+/* End the SuperServer                                               */
+/*-------------------------------------------------------------------*/
+
+end_server:
+
+logmsg("SuperServer ITCPSRCV: ended normally",901);
+
+return;
+
+/* Abort the socket                                                  */
+/*-------------------------------------------------------------------*/
+
+abort_socket:
+
+logmsg("*** SuperServer ITCPSRCV: ended ABNORMALLY ***",900);
+
+return;
+
+/*-------------------------------------------------------------------*/
+/* End of main program                                               */
+/*-------------------------------------------------------------------*/
+
+}
+
+/*********************************************************************/
+/* Function: tcpenmsg                                                */
+/*********************************************************************/
+
+static void tcpenmsg(char                    *tcp_functionname,
+                     int                      tcp_errno)
+{
+   unsigned char               msg_bufferí120ù;
+   unsigned char *             error_desc;
+   int                         error_desc_length;
+   MSGH                        msg_msgh;
+
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+   sock_errdesc(tcp_errno, &error_desc, &error_desc_length);
+
+   sprintf(msg_buffer,
+           "ITCPSRCV function %s - %s",
+           tcp_functionname,
+           error_desc);
+
+   msg(&msg_msgh, 900, 1, msg_buffer, strlen(msg_buffer));
+
+   return;
+}
+
+/*********************************************************************/
+/* Function: logmsg                                                  */
+/*********************************************************************/
+
+static void logmsg(char                       *message,
+                   int                         msgnum)
+{
+
+   MSGH                        msg_msgh;
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+   msg(&msg_msgh, msgnum, 1, message, strlen(message));
+   return;
+}

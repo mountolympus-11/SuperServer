@@ -1,0 +1,793 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Modude: IHXPCPIC - Host Xport CPI-C (LU 6.2) Transaction           *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This module contains the LU 6.2 CPI-C transaction program       *
+*     for Host Xport Communications.  This transaction program        *
+*     enables PC client sessions (using PC xport) to communication    *
+*     to Host xport server using an LU 6.2 conversation.  This        *
+*     transaction program gets started when a CMALOC request is       *
+*     issued by the Client session.  This transaction will always     *
+*     be started as Process in the ITASK of the LU (session partner). *
+*                                                                     *
+*                                                                     *
+*  Functions:                                                         *
+*                                                                     *
+*     hxpcpic - Host Xport CPI-C transaction ( Xport Driver Module )  *
+*     recvorg - Update Receive buffer origin and reallocate buffer    *
+*     hxpfail - Xport CPI-C diagnostic error message                  *
+*     trantrc - Xport CPI-C Transaction init/term trace message       *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/25/94  R. Colmone           Par# 134222                      *
+*               Initial Version                                       *
+*                                                                     *
+**********************************************************************/
+
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "equs.h"
+#include "msg.h"
+#include "stgmgr.h"
+#include "cmincl.h"
+#include "procsrv.h"
+#include "evcodes.h"
+#include "resmgr.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpcbm.h"
+#include "hxpctrc.h"
+#include "hxpcpic.h"
+
+#define  KBYTES              1024
+#define  DEFAULTBUFFERLENGTH 256
+#define  STGPOOL_SIZE        ( ( 8  * KBYTES ) - 64 )
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxpcpic - Host Xport CPI-C (LU 6.2) Transaction          *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is the LU 6.2 CPI-C transaction program           *
+*     for Host Xport Communications.  This transaction program        *
+*     enables PC client sessions (using PC xport) to communication    *
+*     to Host xport server using an LU 6.2 conversation.  This        *
+*     transaction program gets started when a CMALOC request is       *
+*     issued by the Client session.                                   *
+*                                                                     *
+*     This function receives data from two sources:                   *
+*                                                                     *
+*         CMRCV  - CPI-C receive request used to receive              *
+*                  data from client session.  The HXPRECV             *
+*                  host xport service is called to process            *
+*                  the received data.                                 *
+*                                                                     *
+*         TRECV  - Task receive used to receive messages from         *
+*                  Host transaction processes sent via the            *
+*                  $XPSEND service. The HXPSEND host xport            *
+*                  service is called to send the message onto         *
+*                  the client session.                                *
+*                                                                     *
+*     Note: Waiting for input from the message queue is only          *
+*           performed when we are in SEND Mode (i.e. PC Client        *
+*           transaction program is waiting on CMRCV).                 *
+*                                                                     *
+*                                                                     *
+*  Parameters: Void                                                   *
+*                                                                     *
+*  Returns:    Xport CPI-C return code  (See HXPCPIC.H)               *
+*                                                                     *
+**********************************************************************/
+
+int hxpcpic() {
+
+    struct psess    *ps ;
+    struct appl     *ap ;
+    struct lsess    *ls ;
+    struct xpcpic   *cpic ;
+
+    struct stghdrq  *qh ;
+    struct tmsg     *tmsg ;
+    struct epb      *repb, *mepb, *ntfyepb ;
+    struct wuhdr    *wu ;
+
+    long   cmpstat, ecode ;
+    char   stopped = FALSE , canceled = FALSE ;
+    char   pend_notify = FALSE, recvdata = FALSE, qdata = FALSE ;
+
+    RMTOKEN rmtkn ;
+
+    void *rmxstgt ;
+    void *hxpprot ;
+
+    int  (*stgallc)() ;
+    int  (*stgfree)() ;
+
+    int  tmsglen = 0, rc ;
+    char *tmsgbuff = NULL ;
+
+    char *infoarea ;
+    long infolen ;
+
+    LSESH *lsh ;
+
+    MSGH msgh ;
+
+/*  ----------------------------------------------------------------
+    Initialize message defaults
+    ---------------------------------------------------------------- */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ----------------------------------------------------------------
+    Initialize Storage pool for Xport
+    ---------------------------------------------------------------- */
+    stgallc = ( int (*)() ) getfunc( "XALOC31" ) ;
+    stgfree = ( int (*)() ) getfunc( "XFREE" ) ;
+
+    wu = locwuhdr( SCOPE_PCB ) ;
+
+    if ( ! ( qh = stgget( &wu->stgqh, sizeof ( struct stghdrq ) ) ) ) {
+        return( hxpfail( &msgh, HXPCPIC_STGINIT ) ) ;
+    }
+
+    memset( qh, 0, sizeof( struct stghdrq ) ) ;
+
+    rmxstgt = (void *) *((unsigned long*)( getfunc( "IRMXSTGT" ) ) ) ;
+    resmgr( RESMGR_ADD, &rmtkn, 0, rmxstgt, qh ) ;
+
+    if ( stginit( qh, STGPOOL_SIZE, stgallc, stgfree, 0 ) ) {
+        return( hxpfail( &msgh, HXPCPIC_STGINIT ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Initialize Message Event
+    ---------------------------------------------------------------- */
+    mepb = wu->mepba ;
+    setepb( &mepb, EC_MSG, 0, 0, 0, SCOPE_LOCAL ) ;
+
+/*  ----------------------------------------------------------------
+    Alloc / Initialize Primary Session Block
+    ---------------------------------------------------------------- */
+    if ( ! ( ps = stgget( qh, sizeof( struct psess ) ) ) ) {
+        return( hxpfail( &msgh, HXPCPIC_STG ) ) ;
+    }
+
+    memcpy( ps->psess_id, "PSESS   ", sizeof ps->psess_id ) ;
+    memcpy( ps->profname, "CPIC    ", sizeof ps->profname ) ;
+
+    ps->usrproc = (void *) *((unsigned long*)( getfunc( "IUSRAPPL" ))) ;
+    ps->xpqh    = qh ;
+    ps->lutype  = LUTYPE_62 ;
+    ps->bufsize = ( 32 * 1024 ) ;
+
+/*  ----------------------------------------------------------------
+    Alloc / Initialize CPIC Communication Area Block
+    ---------------------------------------------------------------- */
+    if ( ! ( cpic = stgget( qh, sizeof( struct xpcpic ) ) ) ) {
+        return( hxpfail( &msgh, HXPCPIC_STG ) ) ;
+    }
+
+    ps->commblk  = cpic ;
+    memcpy( cpic->id, "XP$CPIC ", sizeof cpic->id ) ;
+
+    cpic->deallocatetype    = CM_DEALLOCATE_FLUSH ;
+    cpic->sendtype          = CM_SEND_AND_CONFIRM ;
+    cpic->ptrtype           = CM_PREP_TO_RECEIVE_FLUSH ;
+    cpic->returncontrol     = CM_WHEN_SESSION_ALLOCATED ;
+    cpic->rtsreceived       = CM_REQ_TO_SEND_NOT_RECEIVED ;
+    cpic->receivetype       = CM_RECEIVE_AND_WAIT ;
+    cpic->bufferrecvorigin  = NULL ;
+    cpic->bufferlength      = 0 ;
+    cpic->totalrecvlength   = 0 ;
+    cpic->requestedlength   = 0 ;
+    cpic->sendlength        = 0 ;
+    cpic->datareceivedtype  = 0 ;
+    cpic->statusreceived    = 0 ;
+    cpic->receivedlength    = 0 ;
+
+/*  ----------------------------------------------------------------
+    Determine if class "T" message class is active
+    ---------------------------------------------------------------- */
+    if ( msgattr( "Xptrace" ) )
+        cpic->cstatus &= ~STATUS_TRACE ;
+    else
+        cpic->cstatus |=  STATUS_TRACE ;
+
+/*  ----------------------------------------------------------------
+    Issue cmaccp to accept conversation
+    ---------------------------------------------------------------- */
+    strcpy( cpic->functionname, "CMACCP" ) ;
+    cmaccp( cpic->convid, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+    cpic->cstatus          |= MODE_RECEIVE ;
+
+/*  ----------------------------------------------------------------
+    Extract CPI-C Session partner / state information
+    ---------------------------------------------------------------- */
+    strcpy( cpic->functionname, "CMECS" ) ;
+    cmecs( cpic->convid, &cpic->convstate, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+    strcpy( cpic->functionname, "CMECT" ) ;
+    cmect( cpic->convid, &cpic->convtype, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+    strcpy( cpic->functionname, "CMEMN" ) ;
+    cmemn( cpic->convid, cpic->modename, &cpic->modenamel, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+    strcpy( cpic->functionname, "CMEPLN" ) ;
+    cmepln( cpic->convid, cpic->partnerluname,
+            &cpic->partnerlunamel, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+    strcpy( cpic->functionname, "CMESL" ) ;
+    cmesl( cpic->convid, &cpic->synclevel, &cpic->rc ) ;
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Issue CPI-C transaction started trace message
+    ---------------------------------------------------------------- */
+    trantrc( &msgh, 910, cpic ) ;
+
+/*  ----------------------------------------------------------------
+    Set CPI-C Prepare-to-receive type
+    ---------------------------------------------------------------- */
+    strcpy( cpic->functionname, "CMSPTR" ) ;
+    cmsptr( cpic->convid, &cpic->ptrtype, &cpic->rc ) ;
+
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Set CPI-C receive type to receive and wait
+    ---------------------------------------------------------------- */
+    strcpy( cpic->functionname, "CMSRT" ) ;
+    cmsrt( cpic->convid, &cpic->receivetype, &cpic->rc ) ;
+
+    cpictrc( cpic ) ;
+    if ( cpic->rc != CM_OK ) {
+        hxpcerr( cpic ) ;
+        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Initialize Host Xport Session
+    ---------------------------------------------------------------- */
+    hxpprot = (void *) (*((unsigned long *) ( getfunc( "IHXPPROT" )))) ;
+    if ( rc = hxpinit( ps, hxpprot ) ) {
+        return( hxpfail( &msgh, HXPCPIC_INIT ) ) ;
+    }
+    ps->commstate =  BUSY ;
+
+/*  ----------------------------------------------------------------
+    Allocate the initial receive buffer
+    ---------------------------------------------------------------- */
+    cpic->bufferlength = DEFAULTBUFFERLENGTH ;
+
+    if ( ! ( cpic->buffer = stgget( qh, cpic->bufferlength ) ) ) {
+        return( hxpfail( &msgh, HXPCPIC_STG ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Process CPI-C transaction until the session ends. This includes
+    receiving request from the client via CMRCV and receiving messages
+    from Host transaction processes Via TRECV.
+    ---------------------------------------------------------------- */
+    while ( ! ( cpic->cstatus & STATUS_ENDED ) ) {
+
+/*      ------------------------------------------------------------
+        Determine if class "T" message class is active
+        ------------------------------------------------------------     */
+        if ( msgattr( "Xptrace" ) )
+            cpic->cstatus &= ~STATUS_TRACE ;
+        else
+            cpic->cstatus |=  STATUS_TRACE ;
+
+/*      ------------------------------------------------------------
+        Receive all messages waiting on Xport process message QUEUE
+        using the TRECV function (NO_WAIT).  For each message
+        received, call the Host Xport send service.
+        ------------------------------------------------------------ */
+        rc = 0 ;
+
+        while ( ! rc ) {
+            rc = trecv( TRECV_PCB, TRECV_NOWAIT, tmsgbuff, tmsglen )     ;
+
+            if ( rc < 0 ) {
+                if ( tmsgbuff )
+                    stgretn( qh, tmsglen, tmsgbuff ) ;
+
+                tmsglen = - ( rc ) ;
+                rc = 0 ;
+
+                if ( ! ( tmsgbuff = stgget( qh, tmsglen ) ) ) {
+                    return( hxpfail( &msgh, HXPCPIC_STG ) ) ;
+                }
+
+            }
+            else if ( rc == 0 ) {
+
+                setepb( &mepb, EC_MSG, 0, 0, 0, SCOPE_LOCAL ) ;
+
+                tmsg     = ( struct tmsg * ) tmsgbuff ;
+                infoarea = tmsgbuff + sizeof( struct tmsg ) ;
+                infolen  = tmsg->infolen ;
+                lsh      = (LSESH *) &tmsg->words.parm1 ;
+                ntfyepb  = (struct epb *) tmsg->words.parm2 ;
+
+                if ( ( cpic->convstate == CM_SEND_PENDING_STATE ) ||
+                     ( cpic->convstate == CM_SEND_STATE ) )
+                    ps->commstate = READY ;
+                else
+                    ps->commstate = BUSY ;
+
+                rc   = hxpsend( ps, *lsh, ntfyepb, infoarea, infolen ) ;
+
+                if ( tmsg->epbtoken )
+                    epbpost( tmsg->epbtoken, rc ) ;
+
+            }
+
+        }   /* Endwhile ( ! rc )  */
+
+/*      ------------------------------------------------------------
+        If host session is currently in receive state, then
+        check lsess send queues to determine if there is any
+        data currently queued.
+        ------------------------------------------------------------ */
+        if ( cpic->convstate == CM_RECEIVE_STATE ) {
+
+            qdata = FALSE ;
+
+            for ( ap = ps->appl ; ap && !qdata ; ap = ap->next )
+                for ( ls = ap->lsess ; ls && !qdata ; ls = ls->next )
+                    if ( ls->sendrecs || ls->sendcurr )
+                        qdata = TRUE ;
+
+        } /* endif ( cpic->convstate == CM_RECEIVE_STATE ) */
+
+/*      ------------------------------------------------------------
+        If host session is currently in receive state and data
+        is queued to be sent, then issue request-to-send to turn
+        direction around.
+        ------------------------------------------------------------ */
+        if ( ( cpic->convstate == CM_RECEIVE_STATE ) && qdata ) {
+
+            strcpy( cpic->functionname, "CMRTS" ) ;
+            cmrts( cpic->convid, &cpic->rc ) ;
+
+            cpictrc( cpic ) ;
+            if ( cpic->rc != CM_OK ) {
+                hxpcerr( cpic ) ;
+                return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+            }
+
+            strcpy( cpic->functionname, "CMECS" ) ;
+            cmecs( cpic->convid, &cpic->convstate, &cpic->rc ) ;
+            cpictrc( cpic ) ;
+
+        } /* endif ( cpic->convstate == CM_RECEIVE_STATE && qdata )  */
+
+/*      ------------------------------------------------------------
+        If session is currently in receive mode and we have been
+        notified of pending data to receive, then receive and
+        process CPI-C request.
+        ------------------------------------------------------------ */
+        if ( ( cpic->cstatus & MODE_RECEIVE ) && recvdata ) {
+
+/*          --------------------------------------------------------
+            Initialize the receive origin address/length and
+            reallocate receive buffer if insufficient size.
+            -------------------------------------------------------- */
+            if ( rc = recvorg( qh, cpic ) ) {
+                return( hxpfail( &msgh, rc ) ) ;
+            }
+
+/*          --------------------------------------------------------
+            Issue receive to obtain queued data
+            -------------------------------------------------------- */
+            strcpy( cpic->functionname, "CMRCV" ) ;
+
+            cmrcv( cpic->convid,
+                   cpic->bufferrecvorigin,
+                   &cpic->requestedlength,
+                   &cpic->datareceivedtype,
+                   &cpic->receivedlength,
+                   &cpic->statusreceived,
+                   &cpic->rtsreceived,
+                   &cpic->rc ) ;
+
+            cpictrc( cpic ) ;
+            if ( cpic->rc != CM_OK ) {
+                hxpcerr( cpic ) ;
+                return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+            }
+
+            if ( cpic->rtsreceived == CM_REQ_TO_SEND_RECEIVED )
+                cpic->cstatus |= STATUS_RTSRECV ;
+
+/*          --------------------------------------------------------
+            Mark the fact that we have already received data.
+            -------------------------------------------------------- */
+            recvdata = FALSE;
+
+/*          --------------------------------------------------------
+            Retrieve current conversation state
+            -------------------------------------------------------- */
+            strcpy( cpic->functionname, "CMECS" ) ;
+            cmecs( cpic->convid, &cpic->convstate, &cpic->rc ) ;
+            cpictrc( cpic ) ;
+
+/*          --------------------------------------------------------
+            Set the Communication state flags accordingly based upon
+            status received.  If this received message is a confirm
+            request, then send back the confirmed.
+            -------------------------------------------------------- */
+            switch ( cpic->statusreceived ) {
+
+                case CM_NO_STATUS_RECEIVED :
+                    break ;
+
+                case CM_SEND_RECEIVED :
+                    cpic->cstatus |= MODE_SENDPEND ;
+                    break ;
+
+                case CM_CONFIRM_SEND_RECEIVED :
+                    cpic->cstatus |= MODE_SENDPEND ;
+
+                case CM_CONFIRM_DEALLOC_RECEIVED:
+                    cpic->cstatus |= STATUS_ENDED ;
+
+                case CM_CONFIRM_RECEIVED:
+                    strcpy( cpic->functionname, "CMCFMD" ) ;
+                    cmcfmd( cpic->convid, &cpic->rc ) ;
+                    cpictrc( cpic ) ;
+                    if ( cpic->rc != CM_OK ) {
+                        hxpcerr( cpic ) ;
+                        return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+                    }
+
+                    break ;
+
+                default :
+                    break ;
+            }
+
+            cpic->totalrecvlength += cpic->receivedlength ;
+
+/*          --------------------------------------------------------
+            When complete data is received,  set the communication
+            state flags as ready to process xport request.
+            -------------------------------------------------------- */
+            if ( cpic->datareceivedtype == CM_COMPLETE_DATA_RECEIVED )
+                cpic->cstatus |= STATUS_HXPREQ ;
+
+/*          --------------------------------------------------------
+            If SEND pending state is set due to receiving SEND_RECEIVE
+            status,  then mark the communication state in SEND mode
+            and mark session as READY to send (Xport usage).
+            -------------------------------------------------------- */
+            if ( ( cpic->convstate == CM_SEND_PENDING_STATE ) ||
+                 ( cpic->convstate == CM_SEND_STATE ) )
+                ps->commstate = READY ;
+            else
+                ps->commstate = BUSY ;
+
+            if ( cpic->cstatus & MODE_SENDPEND ) {
+                cpic->cstatus &= ~MODE_RECEIVE ;
+                cpic->cstatus |= MODE_SEND ;
+            }
+
+/*          --------------------------------------------------------
+            If Xport request is available or session is in Send
+            pending state,  then call Host xport service to process
+            the request or send pending request.
+            -------------------------------------------------------- */
+            if ( ( cpic->cstatus & STATUS_HXPREQ )     ||
+                 ( cpic->cstatus & MODE_SENDPEND ) )
+
+                rc = hxprecv( ps, cpic->buffer, cpic->totalrecvlength) ;
+
+        } /* Endif ( ( cpic->cstatus & MODE_RECEIVE ) && recvdata )  */
+
+/*      ------------------------------------------------------------
+        If we are currently in receive mode and conversation is
+        in send state or send-pending state,  then issue prepare-to-
+        receive to turn conversation direction around and enter
+        receive state.
+        ------------------------------------------------------------ */
+        if ( ( ( cpic->cstatus & MODE_RECEIVE )                   ||
+               ( cpic->cstatus & STATUS_RTSRECV ) )               &&
+             ( ( cpic->convstate   == CM_SEND_STATE )             ||
+               ( cpic->convstate   == CM_SEND_PENDING_STATE ) ) ) {
+
+            cpic->rtsreceived  = CM_REQ_TO_SEND_NOT_RECEIVED ;
+            cpic->cstatus     &= ~STATUS_RTSRECV ;
+
+            strcpy( cpic->functionname, "CMPTR" ) ;
+            cmptr( cpic->convid, &cpic->rc ) ;
+
+            cpictrc( cpic ) ;
+            if ( cpic->rc != CM_OK ) {
+                hxpcerr( cpic ) ;
+                return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+            }
+
+            cpic->cstatus &= ~MODE_SEND ;
+            cpic->cstatus &= ~MODE_SENDPEND ;
+            cpic->cstatus |= MODE_RECEIVE ;
+
+            strcpy( cpic->functionname, "CMECS" ) ;
+            cmecs( cpic->convid, &cpic->convstate, &cpic->rc ) ;
+            cpictrc( cpic ) ;
+
+        }
+
+/*      ------------------------------------------------------------
+        If a pending receive notification is not currently
+        outstanding,  then initialize an EPB for notification usage
+        and issue receive notification request.
+        ------------------------------------------------------------ */
+        if ( ! pend_notify ) {
+            repb = NULL ;
+            setepb( &repb, EC_HXP_CPICRECV, 0, 0, 0, SCOPE_GLOBAL ) ;
+            xcrnot( cpic->convid, (void *) repb, &cpic->rc ) ;
+            pend_notify = TRUE ;
+        }
+
+/*      ------------------------------------------------------------
+        Suspend process until data received on session or message
+        received from transaction processes.  If stopped or cancelled
+        are received then mark session as ended and set appropriate
+        status flag.
+        ------------------------------------------------------------ */
+        if ( ! ( cpic->cstatus & STATUS_ENDED ) ) {
+            rc = twait( 0, &ecode, &cmpstat ) ;
+
+            if ( rc == - RC04 ) {
+                stopped       = TRUE ;
+                cpic->cstatus |= STATUS_ENDED ;
+            }
+
+            if ( rc == - RC08 ) {
+                canceled      = TRUE ;
+                cpic->cstatus |= STATUS_ENDED ;
+            }
+
+/*          --------------------------------------------------------
+            If event notification from CPI-C receive,  then set
+            recvdata indicator to enable a CPI-C receive.
+            -------------------------------------------------------- */
+            if ( ecode == EC_HXP_CPICRECV ) {
+
+                pend_notify = FALSE ;
+
+                if ( ! cmpstat )
+                    recvdata = TRUE ;
+                else {
+                    cpic->rtsreceived = CM_REQ_TO_SEND_RECEIVED ;
+                    cpic->cstatus    |= STATUS_RTSRECV ;
+                    cpictrc( cpic ) ;
+                }
+            }
+
+        } /* endif ( cpic->cstatus & STATUS_ENDED ) */
+
+    }  /* Endwhile ( ! ( cpic->cstatus & STATUS_ENDED ) ) */
+
+
+/*  ----------------------------------------------------------------
+    If session has been terminated by operator,  issue CPI-C
+    deallocate conversion request.
+    ---------------------------------------------------------------- */
+    if ( stopped || canceled ) {
+
+        strcpy( cpic->functionname, "CMSDT" ) ;
+        cpic->deallocatetype = CM_DEALLOCATE_FLUSH ;
+        cmsrt( cpic->convid, &cpic->deallocatetype, &cpic->rc ) ;
+
+        cpictrc( cpic ) ;
+        if ( cpic->rc != CM_OK ) {
+            hxpcerr( cpic ) ;
+            return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+        }
+
+        strcpy( cpic->functionname, "CMDEAL" ) ;
+        cmdeal( cpic->convid, &cpic->rc ) ;
+
+        cpictrc( cpic ) ;
+        if ( cpic->rc != CM_OK ) {
+            hxpcerr( cpic ) ;
+            return( hxpfail( &msgh, HXPCPIC_ERROR ) ) ;
+        }
+    }
+
+/*  ----------------------------------------------------------------
+    Issue CPI-C transaction Ended trace message
+    ---------------------------------------------------------------- */
+    trantrc( &msgh, 911, cpic ) ;
+
+/*  ----------------------------------------------------------------
+    Free Xport storage pool and queue header
+    ---------------------------------------------------------------- */
+    stgterm( qh ) ;
+    stgretn( &wu->stgqh, sizeof( struct stghdrq ), qh ) ;
+
+    resmgr( RESMGR_DEL, &rmtkn, 0, 0, 0 ) ;
+
+    return 0 ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: recvorg - Update receive buffer origin and realloc buffer*
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is used to maintain the receive buffer.  On an    *
+*     initial receive,  the receive buffer origin is reset to the     *
+*     buffer origin and the lengths are also set accordingly.  If     *
+*     an INCOMPLETE_DATA_RECEIVED status is encountered, a new buffer *
+*     is allocated twice as large as the previous buffer and the data *
+*     is copied to the new buffer.  The receive buffer origin is now  *
+*     set to receive the next portion of the data and the length      *
+*     is set accordingly.  The original buffer is freed.              *
+*                                                                     *
+*  Parameters:  Address of Storage Queue Header                       *
+*               Address of Xport CPI-C communication area block       *
+*                                                                     *
+*  Returns:     HXPCPIC_OK  - Receive buffer origin successfully set  *
+*               HXPCPIC_STG - Storage allocation failed               *
+*                                                                     *
+**********************************************************************/
+
+int recvorg( struct stghdrq *qh, struct xpcpic *cpic ) {
+
+    unsigned char CM_PTR newbuffer ;
+    CM_INT32             newbufferlen ;
+
+    if ( cpic->datareceivedtype == CM_INCOMPLETE_DATA_RECEIVED ) {
+
+        newbufferlen = cpic->bufferlength * 2 ;
+
+        if ( ! ( newbuffer = stgget( qh, newbufferlen ) ) )
+            return HXPCPIC_STG ;
+
+        memcpy( newbuffer, cpic->buffer, cpic->totalrecvlength ) ;
+
+        stgretn( qh, cpic->bufferlength, cpic->buffer ) ;
+
+        cpic->buffer           = newbuffer ;
+        cpic->bufferlength     = newbufferlen ;
+        cpic->requestedlength  = cpic->bufferlength -
+                                 cpic->totalrecvlength ;
+        cpic->bufferrecvorigin = cpic->buffer +
+                                 cpic->totalrecvlength ;
+
+    }
+    else {
+        cpic->bufferrecvorigin = cpic->buffer ;
+        cpic->requestedlength  = cpic->bufferlength ;
+        cpic->totalrecvlength  = 0 ;
+    }
+
+    return 0 ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxpfail - Xport CPI-C Diagnostic error message           *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is called to generate a diagnostic error          *
+*     message to the default message destination.                     *
+*                                                                     *
+*  Parameters:  Address of message handle                             *
+*               Failure return code                                   *
+*                                                                     *
+*  Returns:     0 - Failure return code                               *
+*                                                                     *
+**********************************************************************/
+
+int hxpfail( MSGH *mh, int rc ) {
+
+    maddint( *mh, rc ) ;
+    msg( mh, 21, 0 ) ;
+
+    return rc ;
+}
+
+/**********************************************************************
+*                                                                     *
+*  Function: trantrc - Xport CPI-C Init/Term Transaction Message      *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is called to generate a transaction               *
+*     initialization / termination message.  This message displays    *
+*     the Partner name, Modename and conversation ID.                 *
+*                                                                     *
+*  Parameters:  Address of Message Handle                             *
+*               Trace Message ID                                      *
+*               Address of Xport CPI-C communication area block       *
+*                                                                     *
+*  Returns:     Void                                                  *
+*                                                                     *
+**********************************************************************/
+
+void trantrc( MSGH *mh, int msgid, struct xpcpic *cpic ) {
+
+    maddstr( *mh, cpic->partnerluname, cpic->partnerlunamel ) ;
+    maddstr( *mh, cpic->modename, cpic->modenamel ) ;
+    maddint( *mh, cpic->convidí0ù ) ;
+    maddint( *mh, cpic->convidí1ù ) ;
+    maddint( *mh, cpic->convidí2ù ) ;
+    maddint( *mh, cpic->convidí3ù ) ;
+    maddint( *mh, cpic->convidí4ù ) ;
+    maddint( *mh, cpic->convidí5ù ) ;
+    maddint( *mh, cpic->convidí6ù ) ;
+    maddint( *mh, cpic->convidí7ù ) ;
+    msg( mh, msgid, 0 ) ;
+
+    return ;
+
+}

@@ -1,0 +1,607 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Modude: IHXPTCIP - Host Xport TCP/IP Application                   *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This module contains the TCP/IP application program             *
+*     for Host Xport Communications.  This application program        *
+*     enables PC client sessions (using PC xport) to communication    *
+*     to Host xport server over a TCP/IP conversation.                *
+*                                                                     *
+*  Functions:                                                         *
+*                                                                     *
+*     hxptcip - Xport TCP/IP Session Driver                           *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     03/24/95  R. Colmone                                            *
+*               Initial Version                                       *
+*                                                                     *
+**********************************************************************/
+
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "equs.h"
+#include "convert.h"
+#include "sockincl.h"
+#include "msg.h"
+#include "stgmgr.h"
+#include "procsrv.h"
+#include "timer.h"
+#include "evcodes.h"
+#include "resmgr.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpcbm.h"
+#include "hxptcip.h"
+
+#define  KBYTES              1024
+#define  DEFAULTBUFFERLENGTH 256
+#define  STGPOOL_SIZE        ( ( 8  * KBYTES ) - 64 )
+#define  TIMEOUT  0
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxptcip - Host Xport TCP/IP Application                  *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function performs the services of an host xport protocol   *
+*     driver using a TCP/IP protocol conversation.  This function     *
+*     is initiated via a request to the Super Server to start a       *
+*     session with this XPORT driver.                                 *
+*                                                                     *
+*  Returns:  0 - Process completed normally (close requested)         *
+*           >0 - Failure occurred during conversation                 *
+*                                                                     *
+**********************************************************************/
+
+int hxptcip(
+    char          *parm_applname,
+    long          *parm_length,
+    char          *parm_string,
+    unsigned long *parm_socket,
+    unsigned long *parm_port,
+    unsigned long *parm_hostaddr )
+{
+
+    struct psess        *ps ;
+    struct xptcip       *tcip ;
+    struct sockaddr_in  sockinfo ;
+
+    struct stghdrq  *qh ;
+    struct tmsg     *tmsg ;
+    struct epb      *repb = NULL, *mepb = NULL, *ntfyepb, *timerepb ;
+    struct wuhdr    *wu ;
+
+    long   cmpstat, ecode, timer_interval ;
+    char   pend_notify = FALSE, recvdata = FALSE, pingsent = FALSE ;
+    double timer_id  = 0 ;
+    short  ping_intv = 0 ;
+
+    RMTOKEN rmtkn ;
+
+    void  *rmxstgt ;
+    void  *hxpprot ;
+
+    int   (*stgallc)() ;
+    int   (*stgfree)() ;
+
+    int   tmsglen = 0, rc, namelen ;
+    char  *tmsgbuff = NULL ;
+    char  dotnameí16ù ;
+
+    char  *infoarea ;
+    long  infolen ;
+
+    LSESH *lsh ;
+    MSGH  msgh ;
+
+    unsigned long socksí1ù ;
+
+/*  ----------------------------------------------------------------
+    Initialize message defaults
+    ---------------------------------------------------------------- */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ----------------------------------------------------------------
+    Initialize Storage pool for Xport
+    ---------------------------------------------------------------- */
+    stgallc = ( int (*)() ) getfunc( "XALOC31" ) ;
+    stgfree = ( int (*)() ) getfunc( "XFREE"   ) ;
+
+    wu = locwuhdr( SCOPE_PCB ) ;
+
+    if ( ! ( qh = stgget( &wu->stgqh, sizeof ( struct stghdrq ) ) ) ) {
+        return( tcpfail( NULL, &msgh, HXPTCIP_STG ) ) ;
+    }
+
+    memset( qh, 0, sizeof( struct stghdrq ) ) ;
+
+    rmxstgt = (void *) *((unsigned long*)( getfunc( "IRMXSTGT" ) ) ) ;
+    resmgr( RESMGR_ADD, &rmtkn, 0, rmxstgt, qh ) ;
+
+    if ( stginit( qh, STGPOOL_SIZE, stgallc, stgfree, 0 ) ) {
+        return( tcpfail( NULL, &msgh, HXPTCIP_STGINIT ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Initialize Message Event
+    ---------------------------------------------------------------- */
+    mepb = wu->mepba ;
+    setepb( &mepb, EC_MSG, 0, 0, 0, SCOPE_LOCAL ) ;
+
+/*  ----------------------------------------------------------------
+    Alloc / Initialize Primary Session Block
+    ---------------------------------------------------------------- */
+    if ( ! ( ps = stgget( qh, sizeof( struct psess ) ) ) ) {
+        return( tcpfail( NULL, &msgh, HXPTCIP_STG ) ) ;
+    }
+
+    memcpy( ps->psess_id, "PSESS   ", sizeof ps->psess_id ) ;
+    memcpy( ps->profname, "TCPIP   ", sizeof ps->profname ) ;
+
+    ps->usrproc = (void *) *((unsigned long*)( getfunc( "IUSRAPPL" ))) ;
+    ps->xpqh    = qh ;
+    ps->lutype  = LUTYPE_TCP ;
+    ps->bufsize = ( 32 * 1024 ) ;
+
+/*  ----------------------------------------------------------------
+    Alloc / Initialize TCP/IP Communication Area Block
+    ---------------------------------------------------------------- */
+    if ( ! ( tcip = stgget( qh, sizeof( struct xptcip ) ) ) ) {
+        return( tcpfail( NULL, &msgh, HXPTCIP_STG ) ) ;
+    }
+
+    ps->commblk  = tcip ;
+    memcpy( tcip->id, "XP$TCIP ", sizeof tcip->id ) ;
+
+    tcip->socket = *parm_socket ;
+    namelen      = sizeof( struct sockaddr_in ) ;
+
+    if ( getsockname( tcip->socket,
+                      (struct sockaddr *) &sockinfo,
+                      &namelen ) < 0 ) {
+        tcip->error_code = sock_errno() ;
+        return ( tcpfail( tcip, &msgh, HXPTCIP_INIT ) ) ;
+    }
+
+    tcip->hostport = sockinfo.sin_port ;
+    tcip->hostaddr = sockinfo.sin_addr.s_addr ;
+
+    namelen = sizeof dotname ;
+    inet_ntoax( &sockinfo.sin_addr, dotname, &namelen ) ;
+    memset( tcip->hostaddrx , ' ', sizeof tcip->hostaddrx ) ;
+    memcpy( tcip->hostaddrx , dotname, namelen ) ;
+
+/*  ----------------------------------------------------------------
+    Initialize Host Xport Session
+    ---------------------------------------------------------------- */
+    hxpprot = (void *) (*((unsigned long *) ( getfunc( "IHXPPROT" )))) ;
+    if ( rc = hxpinit( ps, hxpprot ) ) {
+        return( tcpfail( tcip, &msgh, HXPTCIP_INIT ) ) ;
+    }
+    ps->commstate = READY ;
+
+/*  ----------------------------------------------------------------
+    Allocate the initial receive buffer
+    ---------------------------------------------------------------- */
+    tcip->bufferlength = DEFAULTBUFFERLENGTH ;
+
+    if ( ! ( tcip->buffer = stgget( qh, tcip->bufferlength ) ) ) {
+        return( tcpfail( tcip, &msgh, HXPTCIP_STG ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Maintain xport conversations until session terminates
+    ---------------------------------------------------------------- */
+    while ( ! ( tcip->status & STATUS_ENDED ) ) {
+
+/*      ------------------------------------------------------------
+        Receive all messages waiting on Xport process message QUEUE
+        using the TRECV function (NO_WAIT).  For each message
+        received, call the Host Xport send service.
+        ------------------------------------------------------------ */
+        rc = 0 ;
+
+        while ( ! rc ) {
+            rc = trecv( TRECV_PCB, TRECV_NOWAIT, tmsgbuff, tmsglen )     ;
+
+            if ( rc < 0 ) {
+                if ( tmsgbuff )
+                    stgretn( qh, tmsglen, tmsgbuff ) ;
+
+                tmsglen = - ( rc ) ;
+                rc = 0 ;
+
+                if ( ! ( tmsgbuff = stgget( qh, tmsglen ) ) ) {
+                    return( tcpfail( tcip, &msgh, HXPTCIP_STG ) ) ;
+                }
+
+            }
+            else if ( rc == 0 ) {
+
+                setepb( &mepb, EC_MSG, 0, 0, 0, SCOPE_LOCAL ) ;
+
+                tmsg     = ( struct tmsg * ) tmsgbuff ;
+                infoarea = tmsgbuff + sizeof( struct tmsg ) ;
+                infolen  = tmsg->infolen ;
+                lsh      = (LSESH *) &tmsg->words.parm1 ;
+                ntfyepb  = (struct epb *) tmsg->words.parm2 ;
+
+                rc   = hxpsend( ps, *lsh, ntfyepb, infoarea, infolen ) ;
+
+                if ( tmsg->epbtoken )
+                    epbpost( tmsg->epbtoken, rc ) ;
+
+                if ( rc == ERR_SESSION )
+                    return( tcpfail( tcip, &msgh, HXPTCIP_TCPREQ ) ) ;
+
+            }
+
+        }   /* Endwhile ( ! rc )  */
+
+/*      ------------------------------------------------------------
+        If selectx() has notified us of receive readiness then
+        issue TCP/IP receive request.
+        ------------------------------------------------------------ */
+        if ( recvdata ) {
+
+/*          --------------------------------------------------------
+            Receive TCP/IP packet header
+            -------------------------------------------------------- */
+            if ( rc = tcprecv( tcip, qh, TCH_LEN ) )
+                return( tcpfail( tcip, &msgh, rc ) ) ;
+
+            tcip->pkhdr = *( (sTcpIpPacketHdr *) tcip->buffer ) ;
+
+/*          --------------------------------------------------------
+            Convert TCP/IP Header to host format if required
+            -------------------------------------------------------- */
+            if ( tcip->pkhdr.xlate != TCH_XLATE ) {
+                convlong( &tcip->pkhdr.hdrlen  ) ;
+                convlong( &tcip->pkhdr.datalen ) ;
+                convshrt( &tcip->pkhdr.version ) ;
+                convshrt( &tcip->pkhdr.xlate   ) ;
+                convshrt( &tcip->pkhdr.timeout ) ;
+            }
+
+/*          --------------------------------------------------------
+            If this is a version 2 tcpip header, obtain link timeout
+            -------------------------------------------------------- */
+            if ( ( tcip->pkhdr.version == TCH_VERSION_2 ) &&
+                   tcip->pkhdr.timeout )
+                ping_intv = tcip->pkhdr.timeout ;
+
+/*          --------------------------------------------------------
+            Receive XPORT request data
+            -------------------------------------------------------- */
+            if ( tcip->pkhdr.datalen )
+                if ( rc = tcprecv( tcip, qh, tcip->pkhdr.datalen ) )
+                    return( tcpfail( tcip, &msgh, rc ) ) ;
+
+            recvdata = FALSE ;
+
+/*          --------------------------------------------------------
+            If shutdown requested,  set status accordingly
+            -------------------------------------------------------- */
+            if ( tcip->pkhdr.packettype == XPTCH_SHUTDOWN )
+                tcip->status |= STATUS_ENDED ;
+
+/*          --------------------------------------------------------
+            If data packet successfully received,  then call xprecv
+            to process inbound data request.
+            -------------------------------------------------------- */
+            else if ( tcip->pkhdr.packettype == XPTCH_ONLY &&
+                      tcip->pkhdr.datalen ) {
+
+                rc = hxprecv( ps, tcip->buffer, tcip->pkhdr.datalen ) ;
+
+                if ( rc == ERR_SESSION )
+                    return( tcpfail( tcip, &msgh, HXPTCIP_TCPREQ ) ) ;
+            }
+        }  /* End If ( recvdata ) */
+
+/*      ------------------------------------------------------------
+        If receive notification is not outstanding, then initialize
+        an EPB for selectx receive readiness.
+        ------------------------------------------------------------ */
+        if ( ! pend_notify ) {
+
+            if ( ! repb )
+                repb = stgget( &wu->stgqh, sizeof( struct epb ) ) ;
+
+            setepb( &repb, EC_HXP_TCPIPSEL, 0, 0, 0, SCOPE_GLOBAL ) ;
+
+            strcpy( tcip->tcpip_func,  "selectx" ) ;
+            socksí0ù = tcip->socket ;
+
+            if ( selectx( socks, 1, 0, 0, TIMEOUT, &repb->ecb ) < 0 ) {
+                tcip->error_code = sock_errno() ;
+                return ( tcpfail( tcip, &msgh, HXPTCIP_SELECT ) ) ;
+            }
+
+            pend_notify = TRUE ;
+        }
+
+/*      ------------------------------------------------------------
+        Suspend process until data received on session or message
+        received from transaction processes.  If stop or cancel event
+        is received then mark session as ended and set appropriate
+        status flag.
+        ------------------------------------------------------------ */
+        if ( ! ( tcip->status & STATUS_ENDED ) ) {
+
+            if ( ping_intv ) {
+                timer_interval = ( ping_intv / 2 ) * 1000 ;
+                TimerSet( &timer_id, timer_interval, TIMER_NFYEPB,
+                          &timerepb, 0, 0, TIMER_NOSYNC ) ;
+            }
+
+            rc = twait( 0, &ecode, &cmpstat ) ;
+
+            if ( rc == - RC04 || rc == - RC08 )
+                tcip->status |= STATUS_ENDED ;
+
+/*          --------------------------------------------------------
+            Determine if Select notified.  If socket array entry
+            not equal to -1, then set data ready for receive flag.
+            -------------------------------------------------------- */
+            if ( ecode == EC_HXP_TCPIPSEL ) {
+                pingsent    = FALSE ;
+                pend_notify = FALSE ;
+
+                if ( (long) socksí0ù != -1 )
+                       recvdata    = TRUE ;
+                else
+                       tcip->status |= STATUS_ENDED ;
+            }
+
+/*          --------------------------------------------------------
+            If Timer event popped, then reset timer id and Ping client
+            -------------------------------------------------------- */
+            else if ( ecode == EC_TIMER ) {
+                timer_id = 0 ;
+
+                if ( pingsent )
+                    return( tcpfail( tcip, &msgh, HXPTCIP_TIMEOUT ) ) ;
+
+                if ( rc = tcpping( tcip ) )
+                    return( tcpfail( tcip, &msgh, rc ) ) ;
+                else
+                    pingsent = TRUE ;
+            }
+
+/*          --------------------------------------------------------
+            If timer still active, cancel current timer id.
+            -------------------------------------------------------- */
+            if ( timer_id )
+                TimerCnl( &timer_id,  TIMER_NOSYNC ) ;
+
+
+        } /* endif ( tcip->status & STATUS_ENDED ) */
+
+    }  /* Endwhile ( ! ( tcip->status & STATUS_ENDED ) ) */
+
+
+/*  ----------------------------------------------------------------
+    Free Xport storage pool and queue header
+    ---------------------------------------------------------------- */
+    TimerTrm( TIMER_NOSYNC ) ;
+    stgterm( qh ) ;
+    stgretn( &wu->stgqh, sizeof( struct stghdrq ), qh ) ;
+
+    resmgr( RESMGR_DEL, &rmtkn, 0, 0, 0 ) ;
+
+    return 0 ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: tcprecv - TCP/IP receive data                            *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*    This function receives the next available message on the         *
+*    TCP/IP socket.  A recv() is issued for the specified length.     *
+*    If the buffer is available is insufficient for the requested     *
+*    length,  the buffer is reallocated to accomadate this request.   *
+*    Receives are processed until the requested message length is     *
+*    obtained.                                                        *
+*                                                                     *
+*  Parameters:  Pointer to TCP/IP communication block                 *
+*               Pointer to storage Queue header                       *
+*               Length of message to receive                          *
+*                                                                     *
+*  Returns:     0 - Message successfully received                     *
+*              >0 - Error occurred receiving message                  *
+*                                                                     *
+**********************************************************************/
+
+int tcprecv( struct xptcip *tcip, struct stghdrq *qh, long length )
+{
+
+    char  *bp ;
+    long  recvtotal = 0 ;
+    long  recvcurr  = 0 ;
+    long  remainlen = 0 ;
+
+/*  ----------------------------------------------------------------
+    Reallocate buffer if insufficient in length
+    ---------------------------------------------------------------- */
+    if ( length > tcip->bufferlength ) {
+        if ( tcip->buffer ) {
+            stgretn( qh, tcip->bufferlength, tcip->buffer ) ;
+            tcip->bufferlength = 0 ;
+        }
+
+        if ( ! ( tcip->buffer = stgget( qh, length ) ) )
+            return HXPTCIP_STG ;
+
+        tcip->bufferlength = length ;
+    }
+
+/*  ----------------------------------------------------------------
+    Process receive loop until requested buffer length is obtained
+    ---------------------------------------------------------------- */
+    strcpy( tcip->tcpip_func,  "recv" ) ;
+
+    while ( recvtotal < length ) {
+
+        remainlen = length - recvtotal ;
+        bp = tcip->buffer + recvtotal ;
+
+        recvcurr  = recv( tcip->socket, bp, remainlen, 0 ) ;
+
+        if ( recvcurr > 0 )
+            recvtotal += recvcurr ;
+        else {
+            tcip->error_code = sock_errno() ;
+            return HXPTCIP_RECV ;
+        }
+    }
+
+    return 0 ;
+
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: tcpping - TCP/IP ping request                            *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*                                                                     *
+*  Parameters:  Pointer to TCP/IP communication block                 *
+*                                                                     *
+*  Returns:     0 - ping packet successfully sent                     *
+*              >0 - Error occurred sending message                    *
+*                                                                     *
+**********************************************************************/
+
+int tcpping( struct xptcip *tcip )
+{
+
+    sTcpIpPacketHdr pkh ;
+
+    pkh.hdrlen     = TCH_LEN ;
+    pkh.datalen    = 0 ;
+    pkh.version    = TCH_VERSION ;
+    pkh.xlate      = TCH_XLATE ;
+    pkh.packettype = XPTCH_PING ;
+
+    strcpy( tcip->tcpip_func,  "send" ) ;
+
+    if ( send( tcip->socket, (char *) &pkh, TCH_LEN, 0 ) < 0 ) {
+        tcip->error_code = sock_errno() ;
+        return HXPTCIP_PING ;
+    }
+
+    return 0 ;
+
+}
+
+/**********************************************************************
+*                                                                     *
+*  Function: tcpfail - Xport TCP/IP Diagnostic error message          *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is called to generate a diagnostic error          *
+*     message to the default message destination.                     *
+*                                                                     *
+*  Parameters:  Address of TCP/IP Communication block                 *
+*               Address of message handle                             *
+*               Failure return code                                   *
+*                                                                     *
+*  Returns:     0 - Failure return code                               *
+*                                                                     *
+**********************************************************************/
+
+int tcpfail( struct xptcip *tcip, MSGH *mh, int rc ) {
+
+    char *error_desc ;
+    int   error_desc_len ;
+
+/*  -----------------------------------------------------------------
+    If TCP/IP request has failed, then format request error message
+    ----------------------------------------------------------------- */
+    if ( tcip && tcip->error_code ) {
+        sock_errdesc( tcip->error_code, &error_desc, &error_desc_len ) ;
+        maddstr( *mh, error_desc, error_desc_len ) ;
+        maddint( *mh, tcip->error_code ) ;
+        maddstr( *mh, tcip->tcpip_func, 0 ) ;
+        msg( mh, 22, 0 ) ;
+    }
+
+/*  -----------------------------------------------------------------
+    Issue TCP/IP Xport driver failure
+    ----------------------------------------------------------------- */
+    maddint( *mh, rc ) ;
+    maddstr( *mh, geterrd( rc ), 0 ) ;
+    msg( mh, 23, 0 ) ;
+
+    return rc ;
+}
+
+/**********************************************************************
+*                                                                     *
+*  Function: geterrd - Retrieve TCP/IP xport driver error desc        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is called to retrieve the error description       *
+*     associated with a TCP/IP xport driver failure.                  *
+*                                                                     *
+*  Parameters:  TCP/IP Xport driver return code                       *
+*                                                                     *
+*  Returns:     Address of error description                          *
+*                                                                     *
+**********************************************************************/
+
+char * geterrd( int rc ) {
+
+char *error_descíù = {  "Successful Completion",
+                        "Storage pool initialization failure",
+                        "Storage allocation failure",
+                        "Driver initialization error",
+                        "TCP/IP Receive failure",
+                        "TCP/IP Selectx failure",
+                        "TCP/IP request failure",
+                        "TCP/IP send (ping) failure",
+                        "TCP/IP ping response timeout"
+                     } ;
+#define MAX_ERROR_RC  ( (sizeof(error_desc) / sizeof(char *)) - 1 )
+
+
+    if ( rc < 0 || rc > MAX_ERROR_RC )
+        return 0 ;
+    else
+        return error_descí rc ù ;
+
+}

@@ -1,0 +1,642 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/* -------------------------------------------------------------
+
+   stgmgr - storage manager functions
+
+   ------------------------------------------------------------- */
+
+/* #define _STG_RESET_                  /* Free stg set to xFF   */
+#define QISRT 0
+#define QFIFO 1
+
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+/* #include "idebug.h" */
+
+INLINE void      qinit   ( void *qh ) ;
+INLINE void    * qadd    ( void *qh, void *elem, char qtype ) ;
+INLINE void      qdel    ( void *qh, void *elem ) ;
+INLINE struct stgfree * getlfree( struct stghdr *blk ) ;
+struct stghdr  * allocblk( long blksz, int (*stgaloc)() ) ;
+void             mrgfree ( struct stghdrq *, struct stghdr *blk ) ;
+void             rlsefree( struct stghdrq * ) ;
+
+/* *************************************************************
+
+    MACRO:  btwaddr - is addr between "from" and "to" (noninclusive)
+
+    INPUT:
+
+       ADDR, FROM, and TO are all void *
+
+    RETURNS:
+
+       true if FROM < ADDR < TO, false otherwise
+
+   ************************************************************* */
+
+#define btwaddr( ADDR, FROM, TO ) \
+    (((HPSTR)(FROM) < (HPSTR)(ADDR)) && ((HPSTR)(TO) > (HPSTR)(ADDR)))
+
+/* *************************************************************
+
+    MACRO:  setfree - initialize free element and add to freeq
+
+    INPUT:
+
+
+
+    RETURNS:
+
+       pointer to struct stgfree or 0
+
+   ************************************************************* */
+
+#ifdef _STG_RESET_
+  #define   STGRESET  ( memset((ADDR), 0xff, (SIZE) ),
+#else
+  #define   STGRESET  (
+#endif
+
+#define setfree( FQH, ADDR, SIZE )                          \
+   (((SIZE) <= 0 ) ? (void*) 0 :                            \
+               STGRESET                                     \
+               ((struct stgfree *)(ADDR))->size = (SIZE),   \
+               ((struct stgfree *)                          \
+                qadd( (FQH), (struct stgfree *)(ADDR), QISRT ))))
+
+
+/* *************************************************************
+
+    Function:  stginit - Initialize storage block
+
+   ************************************************************* */
+
+int stginit( struct stghdrq *qh ,      /* queue header           */
+             long   blksz ,            /* storage block size     */
+             int    (*stgaloc)() ,     /* stg alloc rtn ptr      */
+             int    (*stgfree)() ,     /* stg free  rtn ptr      */
+             int    (*lockrtn)() )     /* serialization rtn ptr  */
+{
+    struct stghdr *blk ;
+
+    qinit( qh ) ;
+
+    if ( ! blksz )
+        return STGFAIL ;
+
+    if ( ! (blk = allocblk( STGHDRLN + STGFRELN, stgaloc ) ) )
+        return STGFAIL ;
+
+    qadd( qh, blk, QFIFO ) ;
+
+    blk->stdsize = blksz ;
+    blk->stgaloc = stgaloc ;
+    blk->stgfree = stgfree ;
+    blk->lockrtn = lockrtn ;
+    blk->qh      = qh ;
+
+    return STGOK ;
+}
+
+
+/* *************************************************************
+
+    Function:  stgterm - free stgmgr blocks
+
+   ************************************************************* */
+
+int  stgterm( struct stghdrq *qh ) {
+
+    struct stghdr *blk ;
+    int lockrc ;
+    int (*lockrtn)( int ) ;
+    int (*stgfree)( HANDLE * ) ;
+
+    if ( ! qh->first )
+        return STGOK ;
+
+    lockrc = LOCK_HAVE ;
+
+    if ( lockrtn = qh->first->lockrtn ) {
+        if ((lockrc = (lockrtn)(GETLOCK)) == LOCK_FAIL )
+             return STGFAIL ;
+    }
+
+    while (blk = qh->first ) {
+        stgfree = blk->stgfree ;
+        qdel( qh, blk ) ;
+        (stgfree)( &blk->handle ) ;
+    }
+
+    if ( lockrtn && (lockrc == LOCK_OBTAINED ) )
+        (lockrtn)(RELLOCK) ;
+
+    return STGOK ;
+}
+
+
+/* *************************************************************
+
+    Function:  stgget - obtain storage
+
+   ************************************************************* */
+
+void * stgget( struct stghdrq *qh, int size ) {
+
+    struct stghdr  *blk  ;
+    struct stgfree *free ;
+    char   *area = NULL ;
+    long   freesz ;
+    int    Rsize, Reallocsize ;
+    int    lockrc ;
+    int    (*lockrtn)() ;
+
+    lockrc   = LOCK_HAVE ;
+
+    if ( size < 1 || ! ( blk = qh->first ) )
+        return 0 ;
+
+    Rsize = ((size + STGFRELN - 1) / STGFRELN) * STGFRELN ;
+
+/*  ------------------------------------------------------------
+    Call serialization rtn if specified
+    ------------------------------------------------------------ */
+
+    if ( lockrtn = blk->lockrtn )
+        if ((lockrc = (lockrtn)(GETLOCK)) == LOCK_FAIL )
+             return 0 ;
+
+/*  ------------------------------------------------------------
+    Locate free block large enough for requested size
+    ------------------------------------------------------------ */
+
+    blk = qh->first ;
+
+    while ( blk && ! area ) {
+
+        if ( (Rsize <= (blk->size - STGHDRLN)) &&
+             ( ! blk->lfree || blk->lfree->size >= Rsize ) ) {
+
+            free = blk->freeq.first ;
+
+            for ( ; free && ! area ; free = free->next )
+                if (free->size >= Rsize )
+                    area = (char *) free ;
+        }
+
+        if ( ! area ) {
+            if ( blk->coalesce ) {
+                mrgfree( qh, blk ) ;
+                if ( blk->lfree && blk->lfree->size >= Rsize )
+                    continue ;
+            }
+            blk = blk->next ;
+        }
+    }
+
+/*  ------------------------------------------------------------
+    if no block is large enough, allocate a new block
+    ------------------------------------------------------------ */
+
+    if ( ! area )  {
+
+        if ( (Rsize <= (qh->first->stdsize - STGHDRLN)) )
+            Reallocsize = qh->first->stdsize ;
+        else
+            Reallocsize = Rsize + STGHDRLN ;
+
+        if (! (blk = allocblk( Reallocsize, qh->first->stgaloc ))) {
+
+            if ( lockrtn && (lockrc == LOCK_OBTAINED ) )
+                (lockrtn)(RELLOCK) ;
+            return 0 ;
+        }
+
+        blk->stdsize = qh->first->stdsize ;
+        blk->stgaloc = qh->first->stgaloc ;
+        blk->stgfree = qh->first->stgfree ;
+        blk->lockrtn = qh->first->lockrtn ;
+        blk->qh      = qh ;
+
+        qadd( qh, blk, QFIFO ) ;
+
+        area = (char *) blk->freeq.first ;
+    }
+
+/*  ------------------------------------------------------------
+    Remove storage from free queue, put remainder back on freeq
+    ------------------------------------------------------------ */
+
+    blk->returnable    = FALSE ;
+    blk->amtallocated += Rsize ;
+    free = (struct stgfree *) area ;
+    qdel( &blk->freeq, free ) ;
+
+    if (free == blk->lfree)
+        blk->lfree = 0 ;
+
+    freesz = free->size - Rsize ;
+
+    if ( freesz ) {
+        setfree( &blk->freeq, (area + Rsize), freesz ) ;
+    }
+
+    memset( area, 0, size ) ;
+
+    rlsefree( qh ) ;
+
+    if ( lockrtn && (lockrc == LOCK_OBTAINED ) )
+        (lockrtn)(RELLOCK) ;
+
+    return area ;
+}
+
+
+/* *************************************************************
+
+    Function:  stggetl - obtain largest available block
+
+   ************************************************************* */
+
+void * stggetl( struct stghdrq *qh, int *size ) {
+
+    struct stghdr  *blk  ;
+    struct stghdr  *lblk ;
+    struct stgfree *free ;
+    char   *area ;
+    long   lfreesz, Reallocsize ;
+    int    lockrc ;
+    int    (*lockrtn)() ;
+
+    lfreesz  = 0 ;
+
+    if ( ! ( blk = qh->first ) )
+        return 0 ;
+
+/*  ------------------------------------------------------------
+    call serialization routine if specified
+    ------------------------------------------------------------ */
+    lockrc = LOCK_HAVE ;
+
+    if ( lockrtn = blk->lockrtn ) {
+        if ((lockrc = (lockrtn)(GETLOCK)) == LOCK_FAIL )
+             return 0 ;
+    }
+
+/*  ------------------------------------------------------------
+    Locate largest free block available
+    ------------------------------------------------------------ */
+    mrgfree( qh, NULL ) ;
+
+    while ( blk ) {
+
+        if ( !blk->lfree )
+            blk->lfree = getlfree( blk ) ;
+
+        if ( free = blk->lfree )
+            if ( free->size > lfreesz ) {
+                lblk    = blk ;
+                lfreesz = free->size ;
+            }
+        blk = blk->next ;
+    }
+
+/*  ------------------------------------------------------------
+    if no free space available, allocate a new block
+    ------------------------------------------------------------ */
+
+    if ( !lfreesz ) {
+        Reallocsize = qh->first->stdsize;
+        if (! (lblk = allocblk( Reallocsize, qh->first->stgaloc ))) {
+            if ( lockrtn && (lockrc == LOCK_OBTAINED ) )
+                (lockrtn)(RELLOCK) ;
+            return 0 ;
+        }
+
+        lblk->stdsize = qh->first->stdsize ;
+        lblk->stgaloc = qh->first->stgaloc ;
+        lblk->stgfree = qh->first->stgfree ;
+        lblk->lockrtn = qh->first->lockrtn ;
+        lblk->qh      = qh ;
+
+        qadd( qh, lblk, QFIFO ) ;
+
+        lfreesz = lblk->lfree->size ;
+    }
+
+/*  ------------------------------------------------------------
+    Remove free storage from queue and return stg/len
+    ------------------------------------------------------------ */
+
+    free = lblk->lfree ;
+    area = (char *) free ;
+
+    qdel( &lblk->freeq, free ) ;
+
+    memset( area, 0, lfreesz ) ;
+    *size               = lfreesz ;
+    lblk->lfree         = 0 ;
+    lblk->returnable    = FALSE ;
+    lblk->amtallocated += lfreesz ;
+
+    rlsefree( qh ) ;
+
+    if ( lockrtn && (lockrc == LOCK_OBTAINED ) )
+        (lockrtn)(RELLOCK) ;
+
+    return area ;
+}
+
+
+/* *************************************************************
+
+    Function:  stgretn - return storage to block
+
+   ************************************************************* */
+
+int stgretn( struct stghdrq *qh, int size, void *addr ) {
+
+    char   *faddr ;
+    int    fsize, foffset ;
+    int    lockrc ;
+    int    (*lockrtn)() ;
+    int    rc = STGFAIL ;
+
+    struct stghdr *blk ;
+
+    if ( ! ( blk = qh->first ) || ! size )
+        return rc ;
+
+/*  ------------------------------------------------------------
+    Call serialization rtn if specified
+    ------------------------------------------------------------ */
+
+    lockrc   = LOCK_HAVE ;
+
+    if ( lockrtn = blk->lockrtn )
+        if ((lockrc = (lockrtn)(GETLOCK)) == LOCK_FAIL )
+             return rc ;
+
+/*  ------------------------------------------------------------
+    Locate associated storage manager block
+    ------------------------------------------------------------ */
+
+    while (blk && ! btwaddr( addr, blk, (char *) blk + blk->size ))
+        blk = blk->next ;
+
+/*  ------------------------------------------------------------
+    Determine if the specified stg is already free
+    ------------------------------------------------------------ */
+
+    if ( blk ) {
+
+/*      --------------------------------------------------------
+        Determine if the specified stg is already free
+        -------------------------------------------------------- */
+
+        fsize   = ((size + STGFRELN - 1) / STGFRELN) * STGFRELN ;
+        foffset = (char *) addr - (char *) blk ;
+        foffset = ((foffset + STGFRELN - 1) / STGFRELN ) * STGFRELN ;
+        faddr   = (char *) blk + foffset ;
+
+        if ( faddr != addr )
+            fsize  -= STGFRELN ;
+
+        if ( btwaddr( faddr, blk, (char *)blk + blk->size))  {
+            if ( ! setfree( &blk->freeq, faddr, fsize ) )
+                return rc ;
+            blk->lfree    = 0 ;
+            blk->coalesce = TRUE ;
+            rc = STGOK ;
+            if ( ! ( blk->amtallocated -= fsize ) ) {
+                blk->returnable = TRUE ;
+            }
+        }
+    }
+
+
+    if ( lockrtn && ( lockrc == LOCK_OBTAINED ) )
+        (lockrtn)(RELLOCK) ;
+
+    return rc ;
+}
+
+
+/* *************************************************************
+
+    Function: allocblk - Alloc and initialize storage block
+
+   ************************************************************* */
+
+struct stghdr * allocblk( long blksz, int (*stgaloc)() ) {
+
+    struct stghdr  *blk ;
+    LPSTR  P ;
+    HANDLE H ;
+    long   freesz, Rblksz ;
+    char   *freep ;
+
+    Rblksz = (((blksz + STGFRELN - STGHDRLN - 1) / STGFRELN) *
+             STGFRELN) + STGHDRLN ;
+
+    if ( (stgaloc)( Rblksz, &H, &P ))
+        return 0 ;
+
+    blk = (struct stghdr *) P ;
+
+    qinit( &blk->freeq ) ;
+    blk->handle = H ;
+    blk->size   = Rblksz ;
+
+    freesz      = blksz - STGHDRLN ;
+    freep       = (char *) blk + STGHDRLN ;
+
+    blk->lfree  = setfree( &blk->freeq, freep, freesz ) ;
+
+    return blk ;
+}
+
+/* *************************************************************
+
+    Function: mrgfree - coalesce free storage elements in blk
+
+   ************************************************************* */
+
+void mrgfree( struct stghdrq *qh, struct stghdr *onlyblk ) {
+
+    struct stgfree *free, *nfree ;
+    struct stghdr  *blk ;
+
+    blk = ( onlyblk ) ? onlyblk : qh->first ;
+
+    while ( blk ) {
+        if ( blk->coalesce && (free = blk->freeq.first) ) {
+            while ( nfree = free->next ) {
+                if ( !blk->lfree || blk->lfree->size < free->size )
+                    blk->lfree = free ;
+
+                if (((HPSTR) free + free->size) == (HPSTR) nfree) {
+                    free->size += free->next->size ;
+                    qdel( &blk->freeq, nfree ) ;
+
+                    #ifdef _STG_RESET_
+                    memset( nfree, 0xff, STGFRELN ) ;
+                    #endif
+                }
+                else
+                    free = nfree ;
+            }
+
+            if ( !blk->lfree || blk->lfree->size < free->size )
+                blk->lfree = free ;
+        }
+
+        blk->coalesce = FALSE ;
+        blk =  ( onlyblk ) ?  NULL : blk->next ;
+    }
+}
+
+/* *************************************************************
+
+    Function: rlsefree - Release all returnable storage blocks
+
+   ************************************************************* */
+
+void rlsefree( struct stghdrq *qh ) {
+
+    struct stghdr *blk, *nblk ;
+    int (*stgfree)( HANDLE * ) ;
+
+    for ( blk = qh->first ; blk ; blk = nblk ) {
+        nblk = blk->next ;
+        if ( blk->returnable && ( qh->first != qh->last ) ) {
+            qdel( qh, blk ) ;
+            stgfree = blk->stgfree ;
+            (stgfree)( &blk->handle ) ;
+        }
+    }
+}
+
+
+/* *************************************************************
+
+    Function: getlfree - locate largest free area in block
+
+   ************************************************************* */
+
+INLINE struct stgfree * getlfree( struct stghdr *blk ) {
+
+    struct stgfree *free, *lfree ;
+    long   lfreesz ;
+
+    lfreesz = 0 ;
+    lfree   = 0 ;
+    free    = blk->freeq.first ;
+
+    while ( free ) {
+        if (free->size > lfreesz) {
+            lfreesz = free->size ;
+            lfree   = free ;
+        }
+        free = free->next ;
+    }
+
+    return lfree ;
+}
+
+
+/* *************************************************************
+
+    Function: qadd - add element to queue
+
+   ************************************************************* */
+
+INLINE void * qadd( void *qh, void *elem, char qtype ) {
+
+    struct stghdrq *h ;
+    struct stghdr  *p, *e ;
+
+    h = (struct stghdrq *) qh ;
+    e = (struct stghdr  *) elem ;
+
+    if (qtype != QISRT)
+        p = h->last ;
+
+    else  {
+        p = (struct stghdr *) h ;
+        for ( ; p->next && ((HPSTR)p->next < (HPSTR) e) ; p = p->next );
+    }
+
+    if ( (HPSTR) p->next == (HPSTR) e )
+        return NULL ;
+
+    e->next = p->next ;
+    p->next = e ;
+
+    if ( !e->next )
+        h->last = e ;
+
+    return elem ;
+
+}
+
+
+/* *************************************************************
+
+    Function: qdel - remove element from free header
+
+   ************************************************************* */
+
+INLINE void qdel( void *qh, void *elem ) {
+
+    struct stghdrq *h ;
+    struct stghdr  *p, *e ;
+
+    h = (struct stghdrq *) qh ;
+    e = (struct stghdr  *) elem ;
+    p = (struct stghdr  *) h ;
+
+    for ( ; p->next && ( (HPSTR) p->next != (HPSTR) e ) ; p = p->next );
+
+    p->next = e->next ;
+
+    if ( h->last == e )
+        h->last = p ;
+}
+
+
+/* *************************************************************
+
+    Function: qinit - initialize queue header
+
+   ************************************************************* */
+
+INLINE void qinit(void *qh ) {
+
+    struct stghdrq *h ;
+
+    h = (struct stghdrq *) qh ;
+    h->first = 0 ;                     /* init qhdr first ptr    */
+    h->last  = (struct stghdr *) h ;   /* init qhdr last  ptr    */
+}
+

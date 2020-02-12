@@ -1,0 +1,359 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <string.h>
+
+#include "env.h"
+#include "bcb.h"
+#include "stgmgr.h"
+
+#define NULLP ((void *) 0)
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkInit - initialize block storage                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* The Blk series of functions are used to maintain an on-demand      */
+/* expandable contiguous piece of storage containing fixed length     */
+/* storage entries.  When the current block of storage overflows as   */
+/* a result of an entry addition, a larger block is allocated and the */
+/* current smaller block's contents are copied to the larger block.   */
+/* The smaller block is discarded.                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tBcb * BlkInit(                        /* create storage block        */
+  struct stghdrq * StgQ,               /* i/  - storage anchor        */
+  tBco *           Bco,                /* i/  - block control options */
+  tBlkRc *         BlkRc               /*  /o - return code           */
+  )
+
+{
+
+  tBcb *           Bcb;                /* returned block control block*/
+
+  if (BlkRc == NULLP)
+    {
+    return(NULLP);
+    }
+
+  if ((StgQ == NULLP)
+    || (Bco == NULLP)
+    || (Bco->Length <= 0)
+    || (Bco->Count <= 0)
+    || (Bco->Alignment <= 0))
+    {
+    *BlkRc = BlkErrorParm;
+    return(NULLP);
+    }
+
+  /*
+  ** Allocate and initialize BCB.
+  */
+
+  if ((Bcb = stgget(StgQ, sizeof(tBcb))) == NULLP) /* allocated ?     */
+    {
+    *BlkRc = BlkErrorStgget;           /* no, error                   */
+    return(NULLP);
+    }
+
+  memcpy(Bcb->Eyecatch, BcbEyecatch, sizeof(tBcbEyecatch));
+  Bcb->StgQ = StgQ;
+  Bcb->Length = Bco->Length;
+  Bcb->Xpand = Bco->Count;             /* unit of block expansion     */
+  Bcb->Allocated = Bco->Count;
+  Bcb->Alignment = Bco->Alignment;
+  Bcb->AlignedLength =
+    (((Bco->Length - 1)/Bco->Alignment) + 1) * Bco->Alignment;
+
+  Bcb->Current = 0;
+  Bcb->Count = 0;
+
+  /*
+  ** Allocate storage block. (extra entry for initial alignment)
+  */
+
+  if ((Bcb->Origin = stgget(StgQ,
+     Bcb->AlignedLength * (Bco->Count + 1))) == NULLP) /* allocated ? */
+    {
+    BlkTerm(Bcb);
+    *BlkRc = BlkErrorStgget;           /* no, error                   */
+    return(NULLP);
+    }
+
+  /*
+  ** Align first entry
+  */
+
+  Bcb->Aligned = Bcb->Origin + ((long)Bcb->Origin % Bcb->AlignedLength);
+
+  *BlkRc = 0;
+
+  return(Bcb);
+
+} /* BlkInit */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkAdd - Add a pre-populated entry to the storage block            */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tBlkRc BlkAdd(                         /* add block entry             */
+  tBcb *           Bcb,                /* i/  - block control block   */
+  void *           Data                /* i/  - entry to add          */
+  )
+
+{
+
+  char *           NewOrigin;          /* new allocated storage origin*/
+  char *           NewAligned;         /* aligned version of above    */
+
+/* verify Bcb */
+
+  if (Bcb->Current >= Bcb->Allocated)  /* space available ?           */
+    {
+    if ((NewOrigin = stgget(Bcb->StgQ, /* no, get more. Allocated ?   */
+      Bcb->AlignedLength * (Bcb->Xpand + Bcb->Allocated + 1)))
+      == NULLP)
+      {
+      return(BlkErrorStgget);          /* no, error                   */
+      }
+
+    /* CAUTION: non-portable address modulo operation */
+    NewAligned = NewOrigin + ((long)NewOrigin % Bcb->AlignedLength);
+
+    memcpy(                            /* copy old to new             */
+      NewAligned,
+      Bcb->Aligned,
+      Bcb->AlignedLength * Bcb->Count
+      );
+    if (stgretn(Bcb->StgQ,             /* old freed ?                 */
+      Bcb->AlignedLength * Bcb->Allocated, Bcb->Origin) != 0)
+      {
+      stgretn(Bcb->StgQ,
+        Bcb->AlignedLength * (Bcb->Xpand + Bcb->Allocated + 1),
+        NewOrigin);
+      return(BlkErrorStgretn);         /* no, error                   */
+      }
+    Bcb->Origin = NewOrigin;
+    Bcb->Aligned = NewAligned;
+    Bcb->Allocated += Bcb->Xpand;
+    }
+
+  memcpy(Bcb->Aligned + (Bcb->Current * Bcb->AlignedLength),
+    Data, Bcb->Length);
+
+  if (Bcb->Current == Bcb->Count)      /* adding a new entry ?        */
+    {
+    Bcb->Count++;                      /* yes, increment entries used */
+    }
+
+  Bcb->Current++;
+
+  return(0);
+
+} /* BlkAdd */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkTerm - terminate block storage                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Release all block related storage                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tBlkRc BlkTerm(                        /* terminate block storage     */
+  tBcb *           Bcb                 /* i/  - block control block   */
+  )
+
+{
+
+  struct stghdrq * StgQ;               /* storage anchor              */
+
+  if (Bcb->Origin != NULLP)
+    {
+    if (stgretn(Bcb->StgQ,             /* freed ?                     */
+      Bcb->AlignedLength * Bcb->Allocated, Bcb->Origin) != 0)
+      {
+      return(BlkErrorStgretn);         /* no, error                   */
+      }
+    }
+
+  StgQ = Bcb->StgQ;
+
+  if (stgretn(StgQ, sizeof(tBcb), Bcb) != 0) /* freed ?               */
+    {
+    return(BlkErrorStgretn);           /* no, error                   */
+    }
+
+  return(0);
+
+} /* BlkTerm */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkSort - sort block storage                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Peform a sort of the current block contents.                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+void BlkSort(                          /* sort block entries          */
+  tBcb *           Bcb,                /* i/  - block control block   */
+  int LOCAL (*     CompareFunction)(const void *, const void *)
+  )
+
+{
+
+  bubsort(
+    Bcb->Aligned, Bcb->Count, Bcb->AlignedLength, CompareFunction);
+  Bcb->Current = 0;                    /* first entry becomes current */
+
+  return;
+
+} /* BlkSort */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkSeek - alter entry currency, return offset of entry             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Returns:                                                           */
+/*   offset of entry                                                  */
+/*   -1 - error                                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+int BlkSeek(                           /* seek to a block entry       */
+  tBcb *           Bcb,                /* i/  - block control block   */
+  int              Bin,                /* i/  - relative entry index  */
+  tBor             Bor                 /* i/  - origin                */
+  )
+
+{
+
+  switch(Bor)
+    {
+    case BorSet:                       /* from the beginning          */
+      if ((Bin < 0)
+        || (Bin > Bcb->Count))
+        {
+        return(-1);
+        }
+      Bcb->Current = Bin;
+      break;
+
+    case BorCur:                       /* from the current position   */
+      if (((Bin + Bcb->Current) < 0)
+        || ((Bin + Bcb->Current) > Bcb->Count))
+        {
+        return(-1);
+        }
+      Bcb->Current += Bin;
+      break;
+
+    case BorEnd:                       /* from the end                */
+      if (((Bin + Bcb->Count) < 0)
+        || ((Bin + Bcb->Count) > Bcb->Count))
+        {
+        return(-1);
+        }
+      Bcb->Current = Bcb->Count + Bin;
+      break;
+
+    default:
+      return(-1);
+      break;
+    } /* switch */
+
+  return(BlkTell(Bcb));
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkSeekPtr - alter entry currency, return address of entry         */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Returns:                                                           */
+/*   address of entry                                                 */
+/*   NULLP - error                                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+void * BlkSeekPtr(                     /* position to a block entry   */
+  tBcb *           Bcb,                /* i/  - block control block   */
+  int              Bin,                /* i/  - relative entry index  */
+  tBor             Bor                 /* i/  - origin                */
+  )
+
+{
+
+  int              Offset;             /* entry offset                */
+
+  if ((Offset = BlkSeek(Bcb, Bin, Bor)) < 0)
+    {
+    return(NULLP);
+    }
+
+  return(Bcb->Aligned + Offset);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* BlkGet - copy current block-entry data into supplied buffer and    */
+/* position to next entry                                             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tBlkRc BlkGet(                         /* get current block entry data*/
+  tBcb *           Bcb,                /* i/  - block control block   */
+  void *           Data                /*  /o - data target address   */
+  )
+
+{
+
+/* verify Bcb */
+
+  if (Bcb->Current >= Bcb->Count)
+    {
+    return(BlkErrorEod);
+    }
+
+  memcpy(
+    Data,
+    Bcb->Aligned + (Bcb->Current * Bcb->AlignedLength),
+    Bcb->Length
+    );
+
+  Bcb->Current++;
+
+  return(0);
+
+}

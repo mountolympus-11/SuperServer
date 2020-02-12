@@ -1,0 +1,495 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/* add logic to the report functions to flush list contents */
+/* and free list-storage not freed (due to missing listterm call) */
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "env.h"                       /* environment                 */
+#include "stgmgr.h"                    /* storage manager             */
+#include "rcb.h"                       /* report control block        */
+#include "lcb.h"                       /* report list control block   */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* RptListStart - start a report list                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* All strings and control options supplied to this routine are       */
+/* copied and anchored via the returned Lcb.                          */
+/*                                                                    */
+/* Multiple lists, with different control options may be started.     */
+/*                                                                    */
+/* Options:                                                           */
+/* --------                                                           */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Notes:                                                             */
+/* - add a "no validate" flag to Lco->Lcf to bypass validation        */
+/* - if so, remember to assign MaxListLength, DataLength & ListLength */
+/* - add list-group call & list-entry grouping requiremnets           */
+/* - add list orientation option to arrange lists vertically          */
+/*                                                                    */
+/*   for example commands:                                            */
+/*     list(1)   yields:                                              */
+/*     list(2)     Horizontal  Vertical                               */
+/*     list(3)     1 2 3       1 3 5                                  */
+/*     list(4)     4 5 6       2 4 6                                  */
+/*     list(5)                                                        */
+/*     list(6)                                                        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tLcb * RptListStart(                   /* start a list                */
+  tRcb *           Rcb,                /* i/  - list control block    */
+  tLco *           Lco,                /* i/  - list control options  */
+  tRptRc *         RptRc               /*  /o - return code           */
+  )
+
+{
+
+  short            MaxListLength;
+  short            DataLength;
+  short            ListLength;
+  short            MaxEntries;
+  unsigned short   Size;
+  unsigned short   Count;
+  unsigned short   PadPrefixLength;
+  unsigned short   PadSuffixLength;
+  tLcb *           Lcb;
+
+  /*
+  ** Validate options.
+  */
+
+  if ( (Lco->PadPrefix == NULLP)
+    || (Lco->PadSuffix == NULLP)
+    || (Lco->Prefix == NULLP)
+    || (Lco->Suffix == NULLP)
+    || (Lco->Delimitter == NULLP)
+    || (((Lco->Lcf & LcfTabOn) != 0) && (Lco->Tab <= 0))
+    || ((Lco->Lej == LejLeft) && (*Lco->PadSuffix == NULLC))
+    || ((Lco->Lej == LejRight) && (*Lco->PadPrefix == NULLC))
+    || ((Lco->Lej == LejCenter)
+       && (*Lco->PadPrefix == NULLC)
+       && (*Lco->PadSuffix == NULLC))
+    || ((MaxListLength = Rcb->LineLength - strlen(Lco->Prefix)
+       - strlen(Lco->Suffix)) <= 0)
+    || (Lco->ListLength > MaxListLength)
+    || (Lco->DataLength > MaxListLength - strlen(Lco->Delimitter))
+    || ((DataLength = ((Lco->DataLength == 0) ?
+       MaxListLength-strlen(Lco->Delimitter) : Lco->DataLength))
+       >
+       (ListLength = ((Lco->ListLength == 0) ?
+       MaxListLength : Lco->ListLength)))
+     )
+    {
+    /* error */
+    *RptRc = RptErrorBadLCO;
+    return(NULLP);
+    }
+
+  /*
+  ** Allocate and initialize Lcb.
+  ** The Lcb is allocated with a following Lco and a string storage
+  ** area.  Input Lco data is copied to the allocated Lco and string
+  ** storage area.
+  */
+
+  if ((PadPrefixLength = strlen(Lco->PadPrefix)) != 0)
+    {
+    PadPrefixLength *= (ListLength / PadPrefixLength) +  1;
+    }
+
+  if ((PadSuffixLength = strlen(Lco->PadSuffix)) != 0)
+    {
+    PadSuffixLength *= ((ListLength / PadSuffixLength) +  1);
+    }
+
+  Size = sizeof(tLcb)
+    + MaxLineLength                    /* Lcb->List                   */
+    + sizeof(tLco)                     /* Lcb->Lco                    */
+    + PadPrefixLength                  /* Lcb->Lco->PadPrefix         */
+    + PadSuffixLength                  /* Lcb->Lco->PadSuffix         */
+    + strlen(Lco->Prefix)              /* Lcb->Lco->Prefix            */
+    + strlen(Lco->Suffix)              /* Lcb->Lco->Suffix            */
+    + strlen(Lco->Delimitter)          /* Lcb->Lco->Delimitter        */
+    + 4;                               /* null terminator for strings */
+
+  if ((Lcb = stgget(Rcb->StgQ, Size)) == NULLP) /* allocated?         */
+    {
+    *RptRc = RptErrorStgget;           /* no, error                   */
+    return(NULLP);
+    }
+
+  memcpy(Lcb->Eyecatch, LcbEyecatch, sizeof(tLcbEyecatch));
+
+  Lcb->Rcb = Rcb;
+  Lcb->Next = Rcb->Lcb;
+  Rcb->Lcb = Lcb;
+  Lcb->Size = Size;
+  Lcb->Entries = 0;
+  Lcb->CurrentLength = 0;
+
+  Lcb->Lco = (tLco *)(Lcb + 1);
+  Lcb->Lco->Lej = Lco->Lej;
+  Lcb->Lco->Lls = Lco->Lls;
+  Lcb->Lco->Lcf = Lco->Lcf;
+  Lcb->Lco->Tab = Lco->Tab;
+/*
+  Lcb->Lco->MaxEntries = ((Lco->ListLength == 0) ?
+    ListLength/(1 + strlen(Lco->Delimitter) : Lco->ListLength);
+*/
+  MaxEntries = ((Lco->DataLength == 0) ?
+/*
+  (Lco->Lej != LejNone) ? 1 : ListLength/(1 + strlen(Lco->Delimitter))
+*/
+    ListLength/(1 + strlen(Lco->Delimitter)) :
+    ListLength /(Lco->DataLength + strlen(Lco->Delimitter)));
+  Lcb->Lco->MaxEntries = ((Lco->MaxEntries == 0) ?
+    MaxEntries : min(MaxEntries, Lco->MaxEntries));
+  Lcb->Lco->ListLength = ListLength;
+  Lcb->Lco->DataLength = DataLength;
+
+
+  /*
+  ** Prepare pad strings for maximum sized pad operations.
+  */
+
+  Lcb->Lco->PadPrefix =
+    strcpy((char *)(Lcb->Lco + 1), Lco->PadPrefix);
+
+  if (PadPrefixLength != 0)
+    {
+    for(Count = ((ListLength / strlen(Lco->PadPrefix)) + 1) - 1;
+      Count > 0;
+      Count--)
+      {
+      strcat(Lcb->Lco->PadPrefix, Lco->PadPrefix);
+      }
+    }
+
+  Lcb->Lco->PadSuffix =
+    strcpy(
+    (Lcb->Lco->PadPrefix + strlen(Lcb->Lco->PadPrefix) + 1),
+    Lco->PadSuffix);
+
+  if (PadSuffixLength != 0)
+    {
+    for(Count = ((ListLength / strlen(Lco->PadSuffix)) + 1) - 1;
+      Count > 0;
+      Count--)
+      {
+      strcat(Lcb->Lco->PadSuffix, Lco->PadSuffix);
+      }
+    }
+
+  Lcb->Lco->Prefix =
+    strcpy(Lcb->Lco->PadSuffix + strlen(Lcb->Lco->PadSuffix) + 1,
+    Lco->Prefix);
+
+  Lcb->Lco->Suffix =
+    strcpy(Lcb->Lco->Prefix + strlen(Lcb->Lco->Prefix) + 1,
+    Lco->Suffix);
+
+  Lcb->Lco->Delimitter =
+    strcpy(Lcb->Lco->Suffix + strlen(Lcb->Lco->Suffix) + 1,
+    Lco->Delimitter);
+
+  Lcb->List = Lcb->Lco->Delimitter + strlen(Lcb->Lco->Delimitter) + 1;
+
+  return(Lcb);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Flush (write) current list data                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptListFlush(                   /* write current list contents */
+  tLcb *           Lcb                 /* i/  - list control block    */
+  )
+
+{
+
+  tRcf             Rcf;                /* preservation variable       */
+  tRptRc           RptRc = 0;          /* return code                 */
+
+  if ((Lcb->Lco->Lcf & LcfListQueued) == 0)
+    {
+    return(0);
+    }
+
+/*  what to do if an incomplete line of entries ? */
+/*  pad to available space before adding suffix ? */
+/*  use pad "entry" to pad to available space ?   */
+/*  handle LcfTabOn in this case */
+
+  if ((Lcb->Lco->Lcf & (LcfDelimitLast | LcfImplicitFlush)) != 0)
+    {
+    strcat(Lcb->List, Lcb->Lco->Delimitter);
+    }
+
+  Lcb->Lco->Lcf &= ~LcfListQueued;   /* no longer queued            */
+
+  Rcf = Lcb->Rcb->Rcf;               /* protect reporter's flags    */
+
+  Rcf |= (RcfSpaceInCall | RcfGroupInCall);
+/*  add internal RcfListCall flag to Rcf ? */
+
+  RptRc = RptWrite(Lcb->Rcb, Lcb->Lco->Lls, 1, "%s%s%s",
+    Lcb->Lco->Prefix, Lcb->List, Lcb->Lco->Suffix);
+
+  Lcb->Rcb->Rcf = Rcf;               /* restore reporter's flags    */
+
+  Lcb->Entries = 0;                  /* list is currently empty     */
+  Lcb->CurrentLength = 0;
+  Lcb->Listí0ù = '\0';
+
+  return(RptRc);
+
+} /* RptListFlush */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Build/write list data                                              */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptList(                        /* create/write list string    */
+  tLcb *           Lcb,                /* i/  - list control block    */
+  char *           Format,             /* i/  - printf-like format... */
+  ...                                  /* i/  - ...string and parms   */
+  )
+
+{
+
+  va_list          ArgList;            /* optional argument list      */
+  int              Left;               /* left pad characters         */
+  int              Right;              /* right pad characters        */
+  unsigned short   DataLength;         /* current list entry length   */
+  char             DataíMaxLineLengthù;/* current list entry data     */
+  unsigned short   ListEntryLength;    /* current list entry length   */
+  char             ListEntryíMaxLineLengthù;/* current list entry     */
+  tRptRc           RptRc = 0;          /* report return code          */
+  int              TabPadLength = 0;
+
+  static const char LstBlanksí32ù =
+    {mR32(' ')};
+
+  if ((Lcb == NULLP)
+    || (memcmp(Lcb->Eyecatch, LcbEyecatch, sizeof(tLcbEyecatch)) != 0))
+    {
+    /* error */
+    return(RptErrorBadLCB);
+    }
+
+  /*
+  ** Establish list entry's data
+  */
+
+  va_start(ArgList, Format);           /* access additional arguments */
+
+  DataLength = vsprintf(Data, Format, ArgList);
+
+  va_end(ArgList);                     /* end argument access         */
+
+  if (DataLength < 0)                  /* error ?                     */
+    {
+    return(-1);                        /* yes, done                   */
+    /* return(RptErrorVsprintf); */    /* yes, done                   */
+    }
+
+  if ((DataLength == 0)                /* suppress null entries ?     */
+    && ((Lcb->Lco->Lcf & LcfNoNull) != 0))
+    {
+    return(0);                         /* yes, done                   */
+    }
+
+  if (DataLength > Lcb->Lco->DataLength)/* more data than allowed ?   */
+    {
+    DataLength = Lcb->Lco->DataLength; /* yes, truncate data          */
+    DataíDataLengthù = '\0';
+    }
+
+  /*
+  ** Build list entry string
+  */
+
+  switch(Lcb->Lco->Lej)                /* justify data in list entry  */
+    {
+    case LejLeft:
+      Left = 0;
+      Right = Lcb->Lco->DataLength - DataLength;
+      break;
+
+    case LejRight:
+      Left = Lcb->Lco->DataLength - DataLength;
+      Right = 0;
+      break;
+
+    case LejCenter:
+      Left = (Lcb->Lco->DataLength - DataLength) / 2;
+      Right = Lcb->Lco->DataLength - DataLength - Left;
+      break;
+
+    default:                           /* do not pad/justify          */
+      Left = 0;
+      Right = 0;
+      break;
+    } /* switch */
+
+  ListEntryLength = sprintf(ListEntry,"%.*s%s%.*s",
+    Left, Lcb->Lco->PadPrefix, Data, Right, Lcb->Lco->PadSuffix);
+
+  if ((Lcb->Lco->Lcf & LcfTabOn) != 0) /* next tab-stop location    */
+    {
+    TabPadLength =
+      (((Lcb->CurrentLength + strlen(Lcb->Lco->Delimitter)
+          + Lcb->Lco->Tab) / Lcb->Lco->Tab)
+      * Lcb->Lco->Tab - Lcb->CurrentLength
+      - strlen(Lcb->Lco->Delimitter)) % Lcb->Lco->Tab;
+/*
+      (Lcb->Lco->Tab -
+      ((((Lcb->CurrentLength == 0) ? 0 : Lcb->CurrentLength - 1)
+      + strlen(Lcb->Lco->Delimitter)) % Lcb->Lco->Tab))
+      % Lcb->Lco->Tab;
+*/
+
+    }
+
+  /*
+  ** Write list and/or add entry to queued list
+  */
+
+  if (((ListEntryLength + Lcb->CurrentLength + TabPadLength
+      + 2*strlen(Lcb->Lco->Delimitter)) > Lcb->Lco->ListLength)
+    || ((Lcb->Entries + 1) > Lcb->Lco->MaxEntries))
+    {
+    Lcb->Lco->Lcf |= LcfImplicitFlush;
+    RptRc = RptListFlush(Lcb);
+    Lcb->Lco->Lcf &= ~LcfImplicitFlush;
+    }
+
+  if (Lcb->Entries != 0)               /* empty list ?                */
+    {
+    strcat(Lcb->List, Lcb->Lco->Delimitter); /* no, append delimitter */
+                                             /* ... to prior entry    */
+    Lcb->CurrentLength += strlen(Lcb->Lco->Delimitter);
+
+    if ((Lcb->Lco->Lcf & LcfTabOn) != 0) /* tabbing ?                 */
+      {
+      TabPadLength =
+        (((Lcb->CurrentLength + Lcb->Lco->Tab)/Lcb->Lco->Tab)
+        * Lcb->Lco->Tab - Lcb->CurrentLength) % Lcb->Lco->Tab;
+/*
+      TabPadLength =
+        (Lcb->Lco->Tab - ((Lcb->CurrentLength - 1) % Lcb->Lco->Tab))
+        % Lcb->Lco->Tab;
+*/
+      strncat(Lcb->List, LstBlanks, TabPadLength);
+      Lcb->CurrentLength += TabPadLength;
+      }
+    }
+
+  Lcb->Entries++;                      /* append entry to list        */
+  Lcb->Lco->Lcf |= LcfListQueued;      /* indicate list is queued     */
+  strcat(Lcb->List, ListEntry);
+  Lcb->CurrentLength += ListEntryLength;
+
+  return(RptRc);
+
+} /* RptList */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* End report list                                                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptListEnd(                     /* end a list (implied flush)  */
+  tLcb *           Lcb                 /* i/  - list control block    */
+  )
+
+{
+  unsigned short   Size;               /* Lcb storage size            */
+  tRcb *           Rcb;                /* report control block        */
+  tLcb *           PriorLcb;
+  tLcb *           LcbToFree;
+  tRptRc           RptRc;              /* return code                 */
+
+  if ((Lcb == NULLP)
+    || (memcmp(Lcb->Eyecatch, LcbEyecatch, sizeof(tLcbEyecatch)) != 0))
+    {
+    /* error */
+    return(RptErrorBadLCB);
+    }
+
+  Rcb = Lcb->Rcb;
+
+  /*
+  ** De-link Lcb from Rcb->Lcb chain
+  */
+
+  for (PriorLcb = NULLP, LcbToFree = Rcb->Lcb;
+    ((Lcb != NULLP) && (LcbToFree != Lcb));
+    PriorLcb = LcbToFree, LcbToFree = LcbToFree->Next)
+    {
+    ; /* locate Lcb to free */
+    }
+
+  if (LcbToFree == NULLP)              /* found ?                     */
+    {
+    return(RptErrorBadLCB);
+    }
+
+  Lcb->Lco->Lcf |= LcfImplicitFlush;
+  RptRc = RptListFlush(Lcb);           /* flush list (implied flush)  */
+  Lcb->Lco->Lcf &= ~LcfImplicitFlush;
+
+  if (PriorLcb == NULLP)               /* first in Rcb->Lcb ?         */
+    {
+    Rcb->Lcb = Lcb->Next;              /* yes, remove from head       */
+    }
+  else
+    {
+    PriorLcb->Next = Lcb;              /* no, remove from Rcb->Lcb    */
+    }
+
+  /*
+  ** Release Lcb storage
+  */
+
+  Size = Lcb->Size;
+
+  if (stgretn(Rcb->StgQ, Size, Lcb) != 0)
+    {
+    Rcb->Rcs |= RcsRcbError;           /* trouble                     */
+    return(RptErrorStgretn);
+    }
+
+  return(RptRc);
+
+}

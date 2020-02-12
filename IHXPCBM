@@ -1,0 +1,412 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "hxport.h"
+#include "hxpcbm.h"
+
+/* *****************************************************************
+
+   Function:  locappl  - locate application area (appl)
+
+   Parameters:
+
+     applid   - application identifier
+     *ps      - pointer to psess block
+
+   Returns:
+
+     ptr to appl or zero
+
+   ***************************************************************** */
+
+struct appl * locappl(Uchar applid, struct psess *ps)  {
+
+    struct appl *ap ;
+
+    for ( ap = ps->appl ; ap ; ap = ap->next )
+        if ( ap->applid == applid )
+            break ;
+
+    return ap ;
+}
+
+
+/* *****************************************************************
+
+   Function:  loclsess - locate logical session area (lsess)
+
+   Parameters:
+
+       LSESH   - logical session handle
+       *ap     - ptr to appl block
+
+   Returns:
+
+       ptr to lsess or zero
+
+  ****************************************************************** */
+
+struct lsess * loclsess( LSESH sesshndl, struct appl *ap ) {
+
+    struct lsess *ls ;
+
+    for ( ls = ap->lsess ; ls ; ls = ls->next )
+        if ( ( ls->sesshndl.lsessid  == sesshndl.lsessid ) &&
+             ( ls->sesshndl.sequence == sesshndl.sequence  ||
+               ! sesshndl.sequence ) )
+            break ;
+
+    return ls ;
+}
+
+
+/* *****************************************************************
+
+   Function:    newappl  - create application area
+
+   Description:
+
+      Each client application needing to communicate with the host is
+      represented by an "application area" described by the appl
+      structure.  It contains information used to link the physical
+      session to which the application is assigned to the various
+      channels (logical sessions) which it may subsequently open.
+
+      This function allocates and initializes storage for an
+      application area.  The completed appl is added to the
+      application list anchored in the physical session block
+      (psess).
+
+      If an error is encountered, a null ptr is returned. an
+
+   Parameters:
+
+      *ps    - ptr to physical session block to which the
+                   application is assigned
+
+      applid - application identifier assign by client
+
+      *stat  - ptr to status return area
+
+   Returns:
+
+      ptr to appl or zero
+
+   Completion codes:
+
+      HXP_OK       - normal completion
+      ERR_STORAGE  - memory not available
+
+   ***************************************************************** */
+
+struct appl * newappl( struct psess *ps, Uchar applid, int *rc ) {
+
+    struct appl  *ap ;
+    struct lsess *hs ;
+    LSESH  sesshndl  ;
+
+    if ( !( ap = stgget( ps->xpqh, sizeof( struct appl ) ) ) )  {
+        *rc = ERR_STORAGE ;
+        return 0 ;
+    }
+
+    memset( ap, 0, sizeof( struct appl ) ) ;
+
+    ap->ps          = ps ;
+    ap->applid      = applid ;
+
+    memset( &sesshndl, 0, sizeof sesshndl ) ;
+    sesshndl.applid = applid ;
+
+    if ( hs = newhsess( ap, sesshndl, rc ) )  {
+        enqueue( (void **) &ps->appl, ap ) ;
+        ps->appl_cnt++ ;
+        *rc = HXP_OK ;
+    }
+
+    if ( *rc == HXP_OK )
+        return ap ;
+
+    else  {
+        delhsess( hs, ap ) ;
+        stgretn( ps->xpqh, sizeof( struct appl ), ap ) ;
+        return 0 ;
+    }
+}
+
+/* *****************************************************************
+
+   Function:    newlsess - create logical session area
+                newhsess - create hyper session\area
+
+      The host and client exchange data over channels referred to as
+      "logical sessions" that provide data buffering and flow
+      controls to the application that owns them.  The client
+      application may use multiple logical sessions to maintain
+      distinct "conversations" with the host.  However, every
+      application has an associated "hyper session" similar in
+      form to a "logical sesion" but used to exchange session
+      management information between the host and application.
+      Both areas are described by the lsess structure.
+
+      These functions allocate and initialize storage for either a
+      logical session or hyper session area.  For logical sessions,
+      an lsess identifier is assigned from a list of available
+      identifiers maintained in the associated application area.
+      (The application hyper lsess has an lsess id of zero).  The
+      completed lsess is added to the appropriate application
+      list anchored in the application area.
+
+      If an error is encountered, a null ptr is returned and an
+      appropriate error code is posted in the status return area
+      provided.
+
+   Parameters:
+
+      *ap      - ptr to the application area to which the
+                 logical/hyper session is assigned
+
+      sesshndl - Logical session handle
+
+      *rc      - ptr to status return area
+
+   Returns:
+
+      ptr to lsess or zero
+
+   Completion codes:
+
+      XPH_OK       - normal completion
+      ERR_STORAGE  - memory not available
+
+   ***************************************************************** */
+
+struct lsess * newhsess(struct appl *ap, LSESH sesshndl, int *rc) {
+
+    return( ap->hsess = newlsess( ap, sesshndl, rc ) ) ;
+
+}
+
+struct lsess * newlsess(struct appl *ap, LSESH sesshndl, int *rc) {
+
+    struct lsess *ls ;
+
+    if ( ! (ls = stgget(ap->ps->xpqh, sizeof(struct lsess) ))) {
+        *rc = ERR_STORAGE ;
+        return 0 ;
+    }
+
+    memset( ls, 0, sizeof(struct lsess) ) ;
+    ls->sesshndl = sesshndl ;
+    ls->appl     = ap ;
+
+    enqueue( (void **) &ap->lsess, ls ) ;
+    ap->lsess_cnt++ ;
+    *rc  = HXP_OK ;
+    return ls ;
+}
+
+
+/* *****************************************************************
+
+   Function:    dellsess - delete logical session area
+                delhsess - delete hyper   session area
+
+   Description:
+
+      The communication channel identified is dequeued from the
+      application list and freed along with all buffer areas
+      associated with it.
+
+   Parameters:
+
+      *ls  - ptr to target logical session area
+
+      *ap  - ptr to application owning logical session
+
+   ***************************************************************** */
+
+void delhsess( struct lsess *hs, struct appl *ap )  {
+
+    dellsess( hs, ap ) ;
+    ap->hsess = 0 ;
+    return ;
+}
+
+void dellsess( struct lsess *ls, struct appl *ap )  {
+
+    if ( !ls )
+        return ;
+
+    dequeue( (void **) &ap->lsess, ls ) ;
+    ap->lsess_cnt-- ;
+
+    freelist( (void **) &ls->sendrecs, ap->ps->xpqh ) ;
+    freelist( (void **) &ls->sendcurr, ap->ps->xpqh ) ;
+    freelist( (void **) &ls->recvcurr, ap->ps->xpqh ) ;
+
+    stgretn( ap->ps->xpqh, sizeof( struct lsess ), ls ) ;
+}
+
+
+/* *****************************************************************
+
+   Function:    delappl  - delete application area
+
+   Description:
+
+      The application area identified is dequeued from its physical
+      session area and is freed along with all associated logical
+      sessions and the hyper session.
+
+   Parameters:
+
+      *ap   - ptr to target application area
+
+      *ps   - ptr to physical session area assigned to the application
+
+   ***************************************************************** */
+
+void delappl(struct appl *ap, struct psess *ps) {
+
+    struct lsess *ls, *lsnext ;
+
+    if ( ! ap )
+        return ;
+
+    dequeue( (void **) &ps->appl, ap ) ;
+    ps->appl_cnt-- ;
+
+    delhsess( ap->hsess, ap ) ;
+
+    for ( ls = ap->lsess ; ls ; ls = lsnext ) {
+        lsnext = ls->next ;
+        dellsess( ls, ap ) ;
+    }
+
+    stgretn( ps->xpqh, sizeof( struct appl ), ap ) ;
+}
+
+
+/* *****************************************************************
+
+   Function:    freelist - delete linked list
+
+   Description:
+
+      This function deletes entries from a linked list, zeroing the
+      list anchor upon completion.  Each entry is assumed to conform
+      to the general data structure described by structure: node.
+
+   Parameters:
+
+      **anchor  - ptr to linked list origin ptr
+
+   ***************************************************************** */
+
+void freelist( void **anchor, struct stghdrq *qh ) {
+
+    struct node *n, *temp ;
+
+    n = (struct node *) *anchor ;
+    while( n ) {
+        temp = n->next ;
+        stgretn( qh, n->length, n ) ;
+        n = temp ;
+    }
+
+    *anchor = 0 ;
+}
+
+
+/* *****************************************************************
+
+   Function:    enqueue - add node to end of doubly linked list
+
+   Description:
+
+      This function adds a target structure to the end of a
+      doubly linked list attached to a unidirectional anchor pointer.
+      STRUCTURE NODE describes the link fields of an arbitrary
+      structure that begins with next-node / prior-node pointers.
+
+   Parameters:
+
+      **origin  - addr of linked list anchor word
+      *tgt      - addr of node to add to list
+
+   ***************************************************************** */
+
+void enqueue( void **origin, void *tgt )  {
+
+    struct node *target, *n ;
+
+    target       = (struct node *) tgt ;
+    target->prev = 0 ;
+    target->next = 0 ;
+
+    if ( ! *origin )
+        *origin = target ;
+    else {
+        for ( n = *origin ; n->next ; n = n->next ) ;
+        n->next = target ;
+        target->prev = n ;
+    }
+}
+
+
+/* *****************************************************************
+
+   Function:    dequeue - remove node from a doubly linked list
+
+   Description:
+
+      This function removes a target structure from a doubly
+      linked list attached to a unidirectional anchor pointer.
+      STRUCTURE NODE describes the link fields of an arbitrary
+      structure that begins with next-node / prior-node pointers.
+
+   Parameters:
+
+      **origin  - addr of linked list anchor word
+      *tgt      - addr of node to remove from list
+
+   ***************************************************************** */
+
+void dequeue( void **origin, void  *tgt )  {
+
+    struct node *left, *right, *target ;
+
+    target  = (struct target *) tgt ;
+    left    = target->prev ;
+    right   = target->next ;
+
+    if (left)
+        left->next  = right ;
+
+    if (right)
+        right->prev = left ;
+
+    if ( *origin == target )
+        *origin = right ;
+}
+

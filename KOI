@@ -1,0 +1,418 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Keyword-Operand Inversion                                          */
+/*                                                                    */
+/* Function:                                                          */
+/*   Invert (decompile) a keyword's operand values.                   */
+/*                                                                    */
+/* Input:                                                             */
+/*   Keyword table                                                    */
+/*   Operand posting control table                                    */
+/*   Exit routine to invoke for each keyword                          */
+/*   Exit parm, caller defined, passed through to the supplied exit   */
+/*     routine.                                                       */
+/*                                                                    */
+/* Return Codes:                                                      */
+/*   See header file.                                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#include "env.h"                       /* environment                 */
+#include "stgmgr.h"                    /* storage manager             */
+#include "koi.h"                       /* keyword-operand inversion   */
+
+#ifdef NULLP
+#undef NULLP
+#endif
+
+#define NULLP ((void *)0)
+
+/*
+** Local typedefs
+*/
+
+typedef struct sKteOpc
+  {
+  struct keytab *  Kte;                /* keyword table entry         */
+  struct postops * Opc;                /* operand post control entry  */
+  } tKteOpc;
+
+/*
+** Local function aliases.
+*/
+
+#define CompareOpcEntries KOICMPOE
+
+/*
+** Local functions.
+*/
+
+static void LocalCleanUp(              /* local clean up routine      */
+  struct stghdrq *,                    /* i/  - storage queue         */
+  tBcb *,                              /* i/  - storage manager       */
+  tBcb *                               /* i/  - storage manager       */
+  );
+
+int CompareOpcEntries(                 /* Compare entries             */
+  const void *,                        /* i/  - entry one             */
+  const void *                         /* i/  - entry two             */
+  );
+
+static struct keytab * LocateKeyTableEntry(
+  struct keytab *,                     /* i/  - keyword table         */
+  struct postops *                     /* i/  - operand control entry */
+  );
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Keyword-Operand Inversion                                          */
+/*                                                                    */
+/* Operand-posting control entries in the supplied operand post       */
+/* control table are sorted into ascending keyword-id sequence.       */
+/* All operand-posting control entries having the same keyword-id     */
+/* are passed to the supplied InversionExit routine along with the    */
+/* the supplied ExitParm and the matching keyword table entry.        */
+/* The exit routine indicates success or failure of the processing of */
+/* the supplied operand entries and keyword.  If the exit routine     */
+/* fails then control returns to the  caller of Keyword-Operand       */
+/* Inversion (after storage cleanup).                                 */
+/*                                                                    */
+/* The "collection" of operand-posting control entries are passed     */
+/* to the exit routine via BLK storage (fixed length storage entries, */
+/* refer to BLK series of functions.  These functions can be used by  */
+/* the exit routine to retrieve opreand-posting control entries and   */
+/* other operations).                                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tKoiRc KeywordOperandInversion(
+  tKoiExit         InversionExit,      /* i/  - inversion exit routine*/
+  void *           ExitParm,           /* i/  - exit parameter        */
+  struct keytab *  Ktb,                /* i/  - keyword table         */
+  struct postops * Opc                 /* i/  - operand post cntl tbl */
+  )
+
+{
+
+  int (*           stgallc)();         /* storage allocator           */
+  int (*           stgfree)();         /* storage releasor            */
+  tKteOpc          KteOpc;             /* key entry operand-post entry*/
+  struct postops * Opc1;               /* current operand-post entry  */
+  int              Entries;            /* operand-post tbl entry count*/
+  tBlkRc           BlkRc;              /* storage manager return code */
+  tKoxRc           ExitRc;             /* exit routine's return code  */
+  int              StgRc;              /* storage manager return code */
+
+  struct stghdrq   StgQ =              /* storage queue               */
+    {NULLP, NULLP};
+  tBcb *           Bcb = NULLP;        /* fixed entry storage manager */
+  tKvc             Kvc = mInitKvc;
+
+  static const tBco Bco =              /* storage manager control opts*/
+    {
+    sizeof(Opc1),                      /* entry size                  */
+    25,                                /* initial space requirements  */
+    4                                  /* fullword alignment          */
+    };
+
+  static const tBco KteOpcBco =        /* storage manager control opts*/
+    {
+    sizeof(tKteOpc),                   /* entry size                  */
+    25,                                /* initial space requirements  */
+    4                                  /* fullword alignment          */
+    };
+
+/*
+** Basic parameter validation.
+*/
+
+  if ((InversionExit == NULLP)         /* parameters look good ?      */
+    || (Ktb == NULLP)
+    || (Opc == NULLP))
+    {
+    return(KoiErrParms);               /* no, error                   */
+    }
+
+/*
+** Initialize temporary storage queue.
+*/
+
+  stgallc = (int (*)())getfunc("XALOC31");
+
+  if (stgallc == NULLP)
+    {
+    return(KoiErrGetFunc);
+    }
+
+  stgfree = (int (*)())getfunc("XFREE");
+
+  if (stgfree == NULLP)
+    {
+    return(KoiErrGetFunc);
+    }
+
+  StgRc = stginit(                     /* initialize storage queue    */
+    &StgQ,                             /* i/  - queue anchor          */
+    4096,                              /* i/  - block size            */
+    stgallc,                           /* i/  - allocation routine    */
+    stgfree,                           /* i/  - release routine       */
+    0                                  /* i/  - lock routine          */
+    );
+
+  if (StgRc != STGOK)
+    {
+    return(KoiErrStg);
+    }
+
+/*
+** Sort Post-Operand-Control entries by keyword name, id and value
+** number so that all values for a specific keyword can be extracted
+** as a sequential group of values.
+*/
+
+  Bcb = BlkInit(&StgQ, (tBco *)&KteOpcBco, &BlkRc);
+
+  if (BlkRc != 0)
+    {
+    LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+    return(KoiErrBlkInit1);
+    }
+
+  for (KteOpc.Opc = Opc; KteOpc.Opc->kwdid != 0; KteOpc.Opc++ )
+    {
+    KteOpc.Kte = LocateKeyTableEntry(Ktb, KteOpc.Opc);
+    if (KteOpc.Kte == NULLP)
+      {
+      LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+      return(KoiErrKeyLocate);
+      }
+
+    BlkRc = BlkAdd(Bcb, &KteOpc);
+    if (BlkRc != 0)
+      {
+      LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+      return(KoiErrBlkAdd1);
+      }
+    } /* for (KteOpc.Opc = ... */
+
+  if ((Entries = BlkEntries(Bcb)) == 0)
+    {
+    LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+    return(KoiErrEmptyOpc);
+    }
+
+  BlkSort(Bcb, CompareOpcEntries);
+
+/*
+** Establish manager to contain post-operand-control entries per
+** keyword table entry.
+*/
+
+  Kvc.Bcb = BlkInit(&StgQ, (tBco *)&Bco, &BlkRc);
+
+  if (BlkRc != 0)
+    {
+    LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+    return(KoiErrBlkInit2);
+    }
+
+/*
+** Collect Post-Operand-Control entries per keyword table entry and
+** invoke the supplied exit routine.
+*/
+
+  ExitRc = 0;
+  BlkRc = BlkGet(Bcb, &KteOpc);
+
+  while ((ExitRc == 0) && (BlkRc == 0))
+    {
+
+    /* Prime collection-per-keyword */
+
+    Opc1 = KteOpc.Opc;
+    Kvc.Kte = KteOpc.Kte;              /* collection's keyword entry  */
+
+    BlkClear(Kvc.Bcb);
+
+    BlkRc = BlkAdd(Kvc.Bcb, &Opc1);
+
+    if (BlkRc != 0)
+      {
+      LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+      return(KoiErrBlkAdd2);
+      }
+
+    /* Accumulate the collection per keyword */
+    while(((BlkRc = BlkGet(Bcb, &KteOpc)) == 0)
+      && (Opc1->kwdid == KteOpc.Opc->kwdid))
+      {
+
+      BlkRc = BlkAdd(Kvc.Bcb, &KteOpc.Opc);
+
+      if (BlkRc != 0)
+        {
+        LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+        return(KoiErrBlkAdd3);
+        }
+
+      } /* while((BlkRc = BlkGet(Bcb, &KteOpc)) == 0) */
+
+    if ((BlkRc == 0) || (BlkRc == BlkErrorEod))
+      {
+      if (BlkSeek(Kvc.Bcb, 0, BorSet) < 0)
+        {
+        LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+        return(KoiErrBlkSeek1);
+        }
+      ExitRc = InversionExit(ExitParm, &Kvc);
+      }
+
+    } /* while ((ExitRc == 0) ... next keyword */
+
+  if (BlkRc != BlkErrorEod)            /* run to completion ?         */
+    {
+    LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+    return(KoiErrBlkGet);              /* no, error                   */
+    }
+
+  if (ExitRc != 0)                     /* clean exit execution ?      */
+    {
+    LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+    return(KoiErrExit);                /* no, error                   */
+    }
+
+  LocalCleanUp(&StgQ, Bcb, Kvc.Bcb);
+
+  return(KoiOK);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Local clean up.                                                    */
+/* Release all storage which has been allocated.                      */
+/*--------------------------------------------------------------------*/
+
+static void LocalCleanUp(
+  struct stghdrq * StgQ,               /* i/  - storage queue         */
+  tBcb *           Bcb,                /* i/  - storage manager       */
+  tBcb *           KeyOpcsBcb          /* i/  - storage manager       */
+  )
+
+{
+
+  if (KeyOpcsBcb != NULLP)             /* exist ?                     */
+    {
+    BlkTerm(KeyOpcsBcb);               /* yes, terminate              */
+    KeyOpcsBcb = NULLP;
+    }
+
+  if (KeyOpcsBcb != NULLP)             /* exist ?                     */
+    {
+    BlkTerm(Bcb);                      /* yes, terminate              */
+    KeyOpcsBcb = NULLP;
+    }
+
+  if ((StgQ != NULLP)                  /* exist ?                     */
+    && (StgQ->first != NULLP))
+    {
+    stgterm(StgQ);                     /* yes, free all               */
+    StgQ->first = NULLP;
+    StgQ->last = NULLP;
+    }
+
+  return;
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Compare exit routine.                                              */
+/* Compare Post-Operand-Control entries to sort by keyword name, id   */
+/* and value number.                                                  */
+/*                                                                    */
+/* A compare B returns:                                               */
+/*   <1 - implies A < B                                               */
+/*    0 - impiles A == B                                              */
+/*   >1 - impiles A > B                                               */
+/*--------------------------------------------------------------------*/
+
+int CompareOpcEntries(                 /* compare entries             */
+  const void *     Entry1,             /* i/  - entry one             */
+  const void *     Entry2              /* i/  - entry two             */
+  )
+
+{
+
+#define KteOpc1 ((tKteOpc *) Entry1)
+#define KteOpc2 ((tKteOpc *) Entry2)
+
+  int              Rc;                 /* return code                 */
+
+  if ((Rc = strncmp(KteOpc1->Kte->keyword,
+    KteOpc2->Kte->keyword,
+    sizeof(KteOpc2->Kte->keyword))) != 0)
+    {
+    return(Rc);
+    }
+
+  if ((Rc = (KteOpc1->Opc->kwdid - KteOpc2->Opc->kwdid)) != 0)
+    {
+    return(Rc);
+    }
+
+  return(KteOpc1->Opc->valno - KteOpc2->Opc->valno);
+
+#undef KteOpc1
+#undef KteOpc2
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Locate key table (base) entry.                                     */
+/* Locate the key table entry in the keyword table which matches the  */
+/* keyword id contained in the supplied operand-post control entry    */
+/*--------------------------------------------------------------------*/
+
+static struct keytab * LocateKeyTableEntry(
+  struct keytab *  Ktb,                /* i/  - keyword table         */
+  struct postops * Oce                 /* i/  - operand control entry */
+  )
+
+{
+
+  struct keytab *  Kte;                /* keytab entry                */
+
+  for (Kte = Ktb;
+    (Kte->keywordí0ù != 0) && (Kte->id_no != Oce->kwdid);
+    Kte++)
+    {
+    ;
+    }
+
+  if (Kte->keywordí0ù == 0)            /* end of table ?              */
+    {
+    return(NULLP);                     /* yes, indicate no match      */
+    }
+
+
+  /* return matching entry (base entry if match was to a synonym */
+  return((Kte->refer == NULLP) ? Kte : Kte->refer);
+
+}

@@ -1,0 +1,712 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#pragma title MODULE: IL62XCNS - CPIC CNOS TRANSACTION'
+
+/*<DOC-ON>*************************************************************/
+/*                                                                    */
+/*    Function: IL62XCNS - Integrator CNOS transaction program        */
+/*                                                                    */
+/* Description: This function is called to provide the CNOS services  */
+/*              for the integrator.  It is started as a CPI-C         */
+/*              transaction program and can be locally initiated or   */
+/*              remotely initiated.                                   */
+/*                                                                    */
+/*  Parameters:                                                       */
+/*                                                                    */
+/*     Returns:                                                       */
+/*                                                                    */
+/*<DOC-OFF>************************************************************/
+
+/**********************************************************************/
+/*                                                                    */
+/* MAINTENANCE:                                                       */
+/*                                                                    */
+/*   09/01/94 Randy Witek                                             */
+/*                                                                    */
+/**********************************************************************/
+
+/*-------------------------------------------------------------------*/
+/* Header Files                                                      */
+/*-------------------------------------------------------------------*/
+
+#include <stdlib.h>
+#include <stdio.h>                /* SASC - STANDARD I/O             */
+#include <string.h>
+#include "cmincl.h"               /* Integrator CPI-C services       */
+#include "l62incl.h"              /* Integrator LU6.2 services       */
+#include "env.h"
+#include "msg.h"                  /* Integrator message services     */
+#include "stgmgr.h"               /* Integrator storage services     */
+
+void   IL6XCNS( char        *parm_tpname,
+                char        *parm_luname,
+                char        *parm_modename,
+                long int    *parm_length,
+                char        *parm_string)
+
+{
+
+/*-------------------------------------------------------------------*/
+/* variable declarations                                             */
+/*-------------------------------------------------------------------*/
+
+struct cvar                 cnosreq;
+char                        cnos_variableí50ù;
+char                        cnos_partnerí8ù;
+char                        cnos_modenameí8ù;
+short                       cnos_session_limit;
+short                       cnos_source_conwin;
+short                       cnos_target_conwin;
+short                       cnos_responsibility;
+short                       cnos_drain_source;
+short                       cnos_drain_target;
+short                       cnos_single_all;
+
+unsigned char               cpic_convidí8ù;
+unsigned char               cpic_convlabelí16ù;
+unsigned char               cpic_modenameí8ù;
+unsigned char               cpic_partnerlunameí17ù;
+unsigned char               cpic_tpnameí64ù;
+unsigned char               cpic_symdestí8ù;
+unsigned char               cpic_bufferí64ù;
+
+CM_INT32                    cpic_sendlength;
+CM_INT32                    cpic_requestedlength;
+CM_INT32                    cpic_receivedlength;
+CM_INT32                    cpic_modenamel;
+CM_INT32                    cpic_partnerlunamel;
+CM_INT32                    cpic_tpnamel;
+
+CM_CONVERSATION_TYPE        cpic_convtype;
+CM_DATA_RECEIVED_TYPE       cpic_datareceivedtype;
+CM_DEALLOCATE_TYPE          cpic_deallocatetype;
+CM_FILL                     cpic_fill;
+CM_RECEIVE_TYPE             cpic_receivetype;
+CM_REQUEST_TO_SEND_RECEIVED cpic_rtsreceived;
+CM_RETURN_CODE              cpic_rc;
+CM_RETURN_CONTROL           cpic_returncontrol;
+CM_SEND_TYPE                cpic_sendtype;
+CM_STATUS_RECEIVED          cpic_statusreceived;
+CM_SYNC_LEVEL               cpic_synclevel;
+
+MSGH                        msg_msgh ;
+unsigned char               msg_bufferí121ù;
+
+int                         i;
+
+/*-------------------------------------------------------------------*/
+/* BEGIN EXECUTION                                                   */
+/*-------------------------------------------------------------------*/
+
+/*-------------------------------------------------------------------*/
+/* initialize message defaults                                       */
+/*-------------------------------------------------------------------*/
+
+msgdft( &msg_msgh, MSGDEFAULT, "L62", MSGDEFAULT, LOGFILE,
+        MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+/*-------------------------------------------------------------------*/
+/* initialize variables                                              */
+/*-------------------------------------------------------------------*/
+
+memset(cpic_buffer, 0, sizeof(cpic_buffer));
+memset(cpic_convid,'9',sizeof(cpic_convid));
+cpic_rtsreceived        = CM_REQ_TO_SEND_NOT_RECEIVED;
+cpic_rc                 = 99999;
+cpic_sendlength         = 0;
+cpic_datareceivedtype   = 0;
+cpic_statusreceived     = 0;
+cpic_receivedlength     = 0;
+
+/*-------------------------------------------------------------------*/
+/* issue cmaccp to see if we are remotely or locally initiated       */
+/*-------------------------------------------------------------------*/
+
+cmaccp(&cpic_convidí0ù,&cpic_rc);
+
+switch(cpic_rc)
+
+   {
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* switch(cpic_rc) -- case(CM_OK)                                    */
+/*                                                                   */
+/* process a remotely initiated transaction                          */
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+
+   case(CM_OK):
+
+/*-------------------------------------------------------------------*/
+/* set up to process a conversation that has been accepted           */
+/*-------------------------------------------------------------------*/
+
+      for ( i = 0; i < 8; i++)
+         sprintf(&cpic_convlabelíi*2ù,"%02X",cpic_convidíiù);
+      sprintf(msg_buffer,
+              "Target start: id=%s, partner=%-.17s, mode=%-.8s",
+              cpic_convlabel,
+              parm_luname,
+              parm_modename);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+      cpic_fill = CM_FILL_LL;
+      cmsf(&cpic_convidí0ù,&cpic_fill,&cpic_rc);
+      cpircmsg("CMSF",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cmect(&cpic_convidí0ù,&cpic_convtype,&cpic_rc);
+      cpircmsg("CMECT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+      if (cpic_convtype != CM_BASIC_CONVERSATION)
+         {
+         strcpy(msg_buffer,"Error: unexpected convtype");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+      cmemn(&cpic_convidí0ù,&cpic_modenameí0ù,
+            &cpic_modenamel,&cpic_rc);
+      cpircmsg("CMEMN",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cmepln(&cpic_convidí0ù,&cpic_partnerlunameí0ù,
+             &cpic_partnerlunamel,&cpic_rc);
+      cpircmsg("CMEPLN",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cmesl(&cpic_convidí0ù,&cpic_synclevel,&cpic_rc);
+      cpircmsg("CMESL",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+      if (cpic_synclevel != CM_NONE)
+         {
+         strcpy(msg_buffer,"Error: unexpected synclevel");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+      cpic_sendtype = CM_SEND_AND_DEALLOCATE;
+      cmsst(&cpic_convidí0ù,&cpic_sendtype,&cpic_rc);
+      cpircmsg("CMSST",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_deallocatetype = CM_DEALLOCATE_FLUSH;
+      cmsdt(&cpic_convidí0ù,&cpic_deallocatetype,&cpic_rc);
+      cpircmsg("CMSDT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_receivetype = CM_RECEIVE_AND_WAIT;
+      cmsrt(&cpic_convidí0ù,&cpic_receivetype,&cpic_rc);
+      cpircmsg("CMSRT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+/*-------------------------------------------------------------------*/
+/* receive the CNOS request                                          */
+/*-------------------------------------------------------------------*/
+
+      cpic_requestedlength = sizeof(cpic_buffer);
+      cmrcv(&cpic_convidí0ù,
+            &cpic_bufferí0ù,
+            &cpic_requestedlength,
+            &cpic_datareceivedtype,
+            &cpic_receivedlength,
+            &cpic_statusreceived,
+            &cpic_rtsreceived,
+            &cpic_rc);
+      cpircmsg("CMRCV",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+      if (cpic_datareceivedtype != CM_COMPLETE_DATA_RECEIVED)
+         {
+         strcpy(msg_buffer,"Error: complete data expected");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+      if (cpic_statusreceived != CM_SEND_RECEIVED)
+         {
+         strcpy(msg_buffer,"Error: send state expected");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+/*-------------------------------------------------------------------*/
+/* examine and validate the CNOS request & prepare a CNOS reply      */
+/*-------------------------------------------------------------------*/
+
+      if (cpic_receivedlength < 17 || cpic_receivedlength > 25)
+         {
+         strcpy(msg_buffer,"Error: unexpected CNOS request length");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+      for ( i = 0; i < cpic_receivedlength; i++)
+         sprintf(&cnos_variableíi*2ù,"%02X",cpic_bufferíiù);
+      sprintf(msg_buffer,
+              "Request (received): %s",
+              cnos_variable);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+      memcpy(&cnosreq,cpic_buffer,cpic_receivedlength);
+
+      xcpcv(&cpic_convidí0ù,
+            (char *)&cnosreq,
+            &cpic_receivedlength,
+            &cpic_rc);
+      cpircmsg("XCPCV",cpic_rc);
+
+      if (cpic_rc ^= CM_OK)
+         {
+         strcpy(msg_buffer,"Error: unexpected rc from XCPCV");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+/*-------------------------------------------------------------------*/
+/* send the CNOS reply                                               */
+/*-------------------------------------------------------------------*/
+
+      cpic_sendlength = cnosreq.cvar_length;
+      memcpy(cpic_buffer,&cnosreq,cpic_sendlength);
+
+      cmsend(&cpic_convidí0ù,
+             &cpic_bufferí0ù,
+             &cpic_sendlength,
+             &cpic_rtsreceived,
+             &cpic_rc);
+      cpircmsg("CMSEND",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      for ( i = 0; i < cpic_sendlength; i++)
+         sprintf(&cnos_variableíi*2ù,"%02X",cpic_bufferíiù);
+      sprintf(msg_buffer,
+              "Reply (sent): %s",
+              cnos_variable);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+      break;
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* switch(cpic_rc) -- case(CM_PROGRAM_STATE_CHECK)                   */
+/*                                                                   */
+/* process a locally initiated transaction                           */
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+
+   case(CM_PROGRAM_STATE_CHECK):
+
+   locally_initiated:
+
+/*-------------------------------------------------------------------*/
+/* obtain the modename & session limits to be negotiated             */
+/*-------------------------------------------------------------------*/
+
+      if (*parm_length != 44)
+         {
+         strcpy(msg_buffer,"Error: unexpected parm");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         return ;
+         }
+
+      memcpy(cnos_partner,&parm_stringí0ù,8);
+      memcpy(cnos_modename,&parm_stringí8ù,8);
+      memcpy(&cnos_session_limit,&parm_stringí18ù,2);
+      memcpy(&cnos_source_conwin,&parm_stringí22ù,2);
+      memcpy(&cnos_target_conwin,&parm_stringí26ù,2);
+      memcpy(&cnos_responsibility,&parm_stringí30ù,2);
+      memcpy(&cnos_drain_source,&parm_stringí34ù,2);
+      memcpy(&cnos_drain_target,&parm_stringí38ù,2);
+      memcpy(&cnos_single_all,&parm_stringí42ù,2);
+
+/*-------------------------------------------------------------------*/
+/* prepare CNOS request                                              */
+/*-------------------------------------------------------------------*/
+
+/*
+/* prepare CNOS for initialze or change request                      */
+/*-------------------------------------------------------------------*/
+
+      if (cnos_session_limit != 0)
+         {
+         cnosreq.cvar_length        = cvarmax;
+         cnosreq.cvar_idí0ù         = 0x12;
+         cnosreq.cvar_idí1ù         = 0x10;
+         cnosreq.cvar_service       = cvar_service_request;
+         cnosreq.cvar_replymod      = 0x00;
+         cnosreq.cvar_action        = cvar_action_set;
+         cnosreq.cvar_drainimm      = 0x00;
+         cnosreq.cvar_resp          = 0x00;
+         if (cnos_responsibility != 0)
+            {
+            cnosreq.cvar_resp          = cvar_resp_target_yes;
+            }
+         cnosreq.cvar_session_limit = cnos_session_limit;
+         cnosreq.cvar_source_conwin = cnos_source_conwin;
+         cnosreq.cvar_target_conwin = cnos_target_conwin;
+         cnosreq.cvar_modesel       = 0x00;
+         cnosreq.cvar_modelen       = 0x08;
+         memcpy(cnosreq.cvar_modename,cnos_modename,8);
+         }
+
+/*
+/* prepare CNOS for reset request                                    */
+/*-------------------------------------------------------------------*/
+
+      else
+         {
+         cnosreq.cvar_idí0ù         = 0x12;
+         cnosreq.cvar_idí1ù         = 0x10;
+         cnosreq.cvar_service       = cvar_service_request;
+         cnosreq.cvar_replymod      = 0x00;
+         cnosreq.cvar_action        = cvar_action_close;
+         cnosreq.cvar_drainimm      = 0x00;
+         cnosreq.cvar_resp          = 0x00;
+         cnosreq.cvar_session_limit = 0;
+         cnosreq.cvar_source_conwin = 0;
+         cnosreq.cvar_target_conwin = 0;
+
+         if (cnos_drain_source != 0)
+            {
+            cnosreq.cvar_drainimm = cnosreq.cvar_drainimm |
+                                    cvar_drainimm_source_yes;
+            }
+
+         if (cnos_drain_target != 0)
+            {
+            cnosreq.cvar_drainimm = cnosreq.cvar_drainimm |
+                                    cvar_drainimm_target_yes;
+            }
+
+         if (cnos_responsibility != 0)
+            {
+            cnosreq.cvar_resp          = cvar_resp_target_yes;
+            }
+
+         if (cnos_single_all != 0)
+            {
+            cnosreq.cvar_modesel       = cvar_modesel_all;
+            cnosreq.cvar_modelen       = 0x00;
+            cnosreq.cvar_length        = cvarmax-8;
+            }
+         else
+            {
+            cnosreq.cvar_modesel       = 0x00;
+            cnosreq.cvar_modelen       = 0x08;
+            memcpy(cnosreq.cvar_modename,cnos_modename,8);
+            cnosreq.cvar_length        = cvarmax;
+            }
+         }
+
+/*-------------------------------------------------------------------*/
+/* set up to allocate a conversation for CNOS                        */
+/*-------------------------------------------------------------------*/
+
+      memset(cpic_symdest,' ',sizeof(cpic_symdest));
+      cminit(&cpic_convidí0ù,cpic_symdest,&cpic_rc);
+      cpircmsg("CMINIT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      for ( i = 0; i < 8; i++)
+         sprintf(&cpic_convlabelíi*2ù,"%02X",cpic_convidíiù);
+      sprintf(msg_buffer,
+              "Source start: id=%s, partner=%-.17s, mode=%-.8s",
+              cpic_convlabel,
+              parm_luname,
+              parm_modename);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+      cpic_convtype = CM_BASIC_CONVERSATION;
+      cmsct(&cpic_convidí0ù,&cpic_convtype,&cpic_rc);
+      cpircmsg("CMSCT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      memcpy(cpic_modename,"SNASVCMG",8);
+      cpic_modenamel = 8;
+      cmsmn(&cpic_convidí0ù,cpic_modename,&cpic_modenamel,&cpic_rc);
+      cpircmsg("CMSMN",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      memcpy(cpic_partnerluname,cnos_partner,sizeof(cnos_partner));
+      cpic_partnerlunamel = 8;
+      cmspln(&cpic_convidí0ù,cpic_partnerluname,
+             &cpic_partnerlunamel,&cpic_rc);
+      cpircmsg("CMSPLN",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_returncontrol = CM_WHEN_SESSION_ALLOCATED;
+      cmsrc(&cpic_convidí0ù,&cpic_returncontrol,&cpic_rc);
+      cpircmsg("CMSRC",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_synclevel = CM_NONE;
+      cmssl(&cpic_convidí0ù,&cpic_synclevel,&cpic_rc);
+      cpircmsg("CMSSL",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_tpnameí0ù = 0x06;
+      cpic_tpnameí1ù = 0xF1;
+      cpic_tpnamel = 2;
+      cmstpn(&cpic_convidí0ù,cpic_tpname,&cpic_tpnamel,&cpic_rc);
+      cpircmsg("CMSTPN",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_fill = CM_FILL_LL;
+      cmsf(&cpic_convidí0ù,&cpic_fill,&cpic_rc);
+      cpircmsg("CMSF",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_sendtype = CM_BUFFER_DATA;
+      cmsst(&cpic_convidí0ù,&cpic_sendtype,&cpic_rc);
+      cpircmsg("CMSST",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cpic_receivetype = CM_RECEIVE_AND_WAIT;
+      cmsrt(&cpic_convidí0ù,&cpic_receivetype,&cpic_rc);
+      cpircmsg("CMSRT",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      cmallc(&cpic_convidí0ù,&cpic_rc);
+      cpircmsg("CMALLC",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+/*-------------------------------------------------------------------*/
+/* send the CNOS request                                             */
+/*-------------------------------------------------------------------*/
+
+      cpic_sendlength = cnosreq.cvar_length;
+      memcpy(cpic_buffer,&cnosreq,cpic_sendlength);
+      cmsend(&cpic_convidí0ù,
+             &cpic_bufferí0ù,
+             &cpic_sendlength,
+             &cpic_rtsreceived,
+             &cpic_rc);
+      cpircmsg("CMSEND",cpic_rc);
+      if (cpic_rc != CM_OK) goto abort_conv;
+
+      for ( i = 0; i < cpic_sendlength; i++)
+         sprintf(&cnos_variableíi*2ù,"%02X",cpic_bufferíiù);
+      sprintf(msg_buffer,
+              "Request (sent): %s",
+              cnos_variable);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+/*-------------------------------------------------------------------*/
+/* receive the CNOS reply                                            */
+/* receive only the first 15 bytes so the conversation stays active  */
+/*-------------------------------------------------------------------*/
+
+      cpic_requestedlength = 15;
+      cmrcv(&cpic_convidí0ù,
+            &cpic_bufferí0ù,
+            &cpic_requestedlength,
+            &cpic_datareceivedtype,
+            &cpic_receivedlength,
+            &cpic_statusreceived,
+            &cpic_rtsreceived,
+            &cpic_rc);
+      cpircmsg("CMRCV",cpic_rc);
+      if (cpic_rc != CM_OK)
+         {
+         strcpy(msg_buffer,"Error: unexpected rc from rcv");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+      if (cpic_datareceivedtype != CM_INCOMPLETE_DATA_RECEIVED)
+         {
+         strcpy(msg_buffer,"Error: incomplete data expected");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+      if (cpic_statusreceived != CM_NO_STATUS_RECEIVED)
+         {
+         strcpy(msg_buffer,"Error: unexpected status rcv'd");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+      if (cpic_receivedlength != 15)
+         {
+         strcpy(msg_buffer,"Error: unexpected length rcv'd");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+/*-------------------------------------------------------------------*/
+/* process the CNOS reply                                            */
+/*-------------------------------------------------------------------*/
+
+      memcpy(&cnosreq,cpic_buffer,15);
+      memcpy(&cpic_bufferí15ù,&cnosreq.cvar_modesel,10);
+
+      cpic_receivedlength = cnosreq.cvar_length;
+      if (cpic_receivedlength < 17 || cpic_receivedlength > 25)
+         {
+         strcpy(msg_buffer,"Error: unexpected CNOS reply length");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+      for ( i = 0; i < cpic_receivedlength; i++)
+         sprintf(&cnos_variableíi*2ù,"%02X",cpic_bufferíiù);
+      sprintf(msg_buffer,
+              "Reply (received): %s",
+              cnos_variable);
+      msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+      xcpcv(&cpic_convidí0ù,
+            (char *)&cnosreq,
+            &cpic_receivedlength,
+            &cpic_rc);
+      cpircmsg("XCPCV",cpic_rc);
+
+      if (cpic_rc ^= CM_OK)
+         {
+         strcpy(msg_buffer,"Error: unexpected rc from XCPCV");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+/*-------------------------------------------------------------------*/
+/* receive the remainder of the CNOS reply                           */
+/*-------------------------------------------------------------------*/
+
+      cpic_requestedlength = 15;
+      cmrcv(&cpic_convidí0ù,
+            &cpic_bufferí15ù,
+            &cpic_requestedlength,
+            &cpic_datareceivedtype,
+            &cpic_receivedlength,
+            &cpic_statusreceived,
+            &cpic_rtsreceived,
+            &cpic_rc);
+      if (cpic_rc != CM_DEALLOCATED_NORMAL)
+         {
+         cpircmsg("CMRCV",cpic_rc);
+         strcpy(msg_buffer,"Error: deallocation expected");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+      if (cpic_datareceivedtype != CM_COMPLETE_DATA_RECEIVED)
+         {
+         strcpy(msg_buffer,"Error: complete data expected");
+         msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+         goto abort_conv;
+         }
+
+      break;
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* switch(cpic_rc) -- default case                                   */
+/*                                                                   */
+/* initial CMACCP return code was unexpected                         */
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+
+   default:
+
+      cpircmsg("CMACCP",cpic_rc);
+      return;
+      break;
+
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+/* switch(cpic_rc) -- end of cases                                   */
+/*-------------------------------------------------------------------*/
+/*-------------------------------------------------------------------*/
+   }
+
+/*-------------------------------------------------------------------*/
+/* issue termination message                                         */
+/*-------------------------------------------------------------------*/
+
+sprintf(msg_buffer,
+        "Negotiation has completed normally");
+
+msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+
+/*-------------------------------------------------------------------*/
+/* Return to caller                                                  */
+/*-------------------------------------------------------------------*/
+
+return;
+
+/*-------------------------------------------------------------------*/
+/* abort locally initiated conversation                              */
+/*-------------------------------------------------------------------*/
+
+abort_conv:
+
+abortcnv(&cpic_convidí0ù);
+return;
+
+}
+
+/*-------------------------------------------------------------------*/
+/* Function: abortcnv                                                */
+/*-------------------------------------------------------------------*/
+
+void ABORTCNV(char                        *cpic_convid)
+
+{
+
+CM_DEALLOCATE_TYPE          cpic_deallocatetype;
+CM_RETURN_CODE              cpic_rc;
+MSGH                        msg_msgh;
+unsigned char               msg_bufferí120ù;
+
+
+   msgdft( &msg_msgh, MSGDEFAULT, "L62", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+   cpic_deallocatetype = CM_DEALLOCATE_ABEND;
+   cmsdt(cpic_convid,&cpic_deallocatetype,&cpic_rc);
+   cmdeal(cpic_convid,&cpic_rc);
+   sprintf(msg_buffer,
+           "Negotiation has completed abnormally");
+   msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+   return;
+
+}
+
+/*-------------------------------------------------------------------*/
+/* Function: cpircmsg                                                */
+/*-------------------------------------------------------------------*/
+
+void CPIRCMSG(char                       *cpic_functionname,
+              CM_RETURN_CODE             cpic_rc)
+
+{
+
+MSGH                        msg_msgh;
+unsigned char               msg_bufferí120ù;
+
+   if (cpic_rc == 0) return;
+
+   msgdft( &msg_msgh, MSGDEFAULT, "L62", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+   sprintf(msg_buffer,
+           "Return code from %s: %i",
+           cpic_functionname,
+           cpic_rc);
+
+   msg(&msg_msgh, 2, 1, msg_buffer, strlen(msg_buffer));
+   return;
+}

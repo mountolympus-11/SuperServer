@@ -1,0 +1,108 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "nav.h"
+#include "navcap.h"
+
+
+/* ******************************************************************
+
+    Function: navcaps - SUPRARC S0,S1 capability string construction
+
+   ****************************************************************** */
+
+void navcaps(                       /* format S0,S1 capabilities      */
+    struct suprarc *sarc,           /* input SUPRARC                  */
+    char   s0retí128ù,              /* output S0 capability string    */
+    char   s1retí128ù )             /* output S1 capability string    */
+{
+    navcapf( sarc->capabilitys0, s0ret ) ;
+    navcapf( sarc->capabilitys1, s1ret ) ;
+}
+
+
+/* ******************************************************************
+
+    Function: navcapf - state capability formatter
+
+   ****************************************************************** */
+
+void navcapf(                       /* state capability formatter     */
+    char   capabilities,            /* capability mask                */
+    char   sretí128ù )              /* capability string return area  */
+{
+    char   *p = 0 ;                 /* true when cap string openned   */
+
+    *sret = 0 ;
+
+ /* p = entrylst( capabilities, cap_FUSS, "uss->",   sret, p ) ; */
+    p = entrylst( capabilities, cap_IN,   "in",      sret, p ) ;
+    p = entrylst( capabilities, cap_OUT,  "out",     sret, p ) ;
+    p = entrylst( capabilities, cap_RPT,  "rpt",     sret, p ) ;
+    p = entrylst( capabilities, cap_TSEL, "select",  sret, p ) ;
+    p = entrylst( capabilities, cap_EXCP, "except",  sret, p ) ;
+ /* p = entrylst( capabilities, cap_TUSS, "->uss",   sret, p ) ; */
+
+    entrylst( 0, 0, 0, sret, p ) ;
+}
+
+
+/* ******************************************************************
+
+    Function: entrylst - build (element-list) string
+
+   ****************************************************************** */
+
+char * entrylst(                    /* state capability formatter     */
+    char   maskbyte,                /* mask byte                      */
+    int    bit,                     /* element bit                    */
+    char   *label,                  /* element lablel / zero at end   */
+    char   *sret,                   /* element list return area       */
+    char   *open )                  /* TRUE if list previously opened */
+{
+
+/* ------------------------------------------------------------------
+    close open element-list upon end-of-data request
+   ------------------------------------------------------------------ */
+
+    if ( ! bit )  {
+        if ( open )  {
+            strcat( sret, ")" ) ;
+            open = FALSE ;
+        }
+    }
+
+/* ------------------------------------------------------------------
+    open element list, if necessary, and insert token
+   ------------------------------------------------------------------ */
+
+    else if ( maskbyte & bit )  {
+        if ( open )
+            strcat( sret, "," ) ;
+        else
+            strcat( sret, "(" ) ;
+
+        open = strcat( sret, label ) ;
+    }
+
+    return open ;
+}

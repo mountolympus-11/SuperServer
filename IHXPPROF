@@ -1,0 +1,407 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "hxpprof.h"
+
+/* *************************************************************
+
+   Function: locxprof - Locate Xport Profile entry
+
+   Description:
+
+      This function will attempt to locate a specific Xport
+      Profile entry.  A profile name and lutype is required
+      succesfully locate a specific profile.  An lutype of
+      "LUANY" in a profile entry is match for all lutypes.
+
+   Parameters: Addr of xprofhdr structure
+               name of profile to locate
+               LUtype
+
+   Returns:    Addr of xprofile structure or 0 if not found
+
+   ************************************************************* */
+
+struct xprofile * locxprof( struct xprofhdr *xph,
+                            char   *profname,
+                            char   lutype         ) {
+
+    int i ;
+    struct xprofile *xp ;
+
+    if (! xph )
+        return 0 ;
+
+    xp  = xph->first ;
+
+    for ( i = xph->entcount ; i ; i--, xp++ ) {
+        if ( ! memcmp( xp->name, profname, sizeof xp->name ) )
+            if ( xp->lutype == LU_ANY ÝÝ xp->lutype == lutype )
+                return xp ;
+    }
+
+    return 0 ;
+}
+
+/* *************************************************************
+
+   Function: lochdfmt - Locate Xport Transmission Header Format
+
+   Description:
+
+      This function will locate the Xport transmission header
+      format header.
+
+   Parameters: Addr of xprofhdr structure
+               name of header type to locate
+
+   Returns:    Addr of xhdrfmt structure or 0 if not found
+
+   ************************************************************* */
+
+struct xhdrfmt * lochdfmt( struct xprofhdr *xph,
+                           char   *hdrtype      ) {
+
+    struct xhdrfmt *xhdr ;
+    char   hdrnameí8ù ;
+
+    if (! xph )
+        return 0 ;
+
+    memset( hdrname, ' ', sizeof hdrname ) ;
+    memcpy( hdrname, hdrtype, min( sizeof hdrname, strlen(hdrtype) ) ) ;
+
+    for (xhdr = xph->hdrfmt ; xhdr ; xhdr = xhdr->next ) {
+        if ( ! memcmp( xhdr->name, hdrname, sizeof xhdr->name ) )
+            return xhdr ;
+    }
+
+    return 0 ;
+}
+
+/* *************************************************************
+
+   Function: lochdfld - Locate Xport Header field definition
+
+   Description:
+
+      This function will locate the Xport transmission header
+      format field definition entry.
+
+   Parameters: Addr of xhdrfmt structure
+               name of field to locate
+
+   Returns:    Addr of xhdrfld structure or 0 if not found
+
+   ************************************************************* */
+
+struct xhdrfld * lochdfld( struct xhdrfmt *xhdr,
+                           char   *fldname       ) {
+
+    int i ;
+    struct xhdrfld *fld ;
+
+    if (! xhdr)
+        return 0 ;
+
+    fld = xhdr->first ;
+
+    for ( i = xhdr->fldentct ; i ; i--, fld++ ) {
+        if (! memcmp( fld->name, fldname, sizeof fld->name ) )
+            return fld ;
+    }
+
+    return 0 ;
+}
+
+
+/* *************************************************************
+
+   Function: getactn - Get Request action
+
+   Description:
+
+      This function will locate the selected request format
+      and set the assocaited action in the request structure.
+
+   Parameters: Addr of profile entry
+               Addr of request structure
+
+   Returns:    0 - Action successfully obtained
+              -1 - Request format not found
+
+   ************************************************************* */
+
+int getactn( struct xprofile *prof, struct request *req ) {
+
+    struct xpreqfmt *fmt ;
+
+    fmt = prof->xpreq ;
+
+    if ( fmt->bid.method  == req->method   &&
+         fmt->bid.methval == req->methval ) {
+        req->action = fmt->bid.action ;
+        return 0 ;
+    }
+
+    if ( fmt->chdir.method  == req->method   &&
+         fmt->chdir.methval == req->methval ) {
+        req->action = fmt->chdir.action ;
+        return 0 ;
+    }
+
+    if ( fmt->logoff.method  == req->method   &&
+         fmt->logoff.methval == req->methval ) {
+        req->action = fmt->logoff.action ;
+        return 0 ;
+    }
+
+    if ( fmt->newsess.method  == req->method   &&
+         fmt->newsess.methval == req->methval ) {
+        req->action = fmt->newsess.action ;
+        return 0 ;
+    }
+
+    if ( fmt->killsess.method  == req->method   &&
+         fmt->killsess.methval == req->methval ) {
+        req->action = fmt->killsess.action ;
+        return 0 ;
+    }
+
+    if ( fmt->conv.method  == req->method   &&
+         fmt->conv.methval == req->methval ) {
+        req->action = fmt->conv.action ;
+        return 0 ;
+    }
+
+    if ( fmt->avail.method  == req->method   &&
+         fmt->avail.methval == req->methval ) {
+        req->action = fmt->avail.action ;
+        return 0 ;
+    }
+
+    if ( fmt->drop.method  == req->method   &&
+         fmt->drop.methval == req->methval ) {
+        req->action = fmt->drop.action ;
+        return 0 ;
+    }
+
+    if ( fmt->ping.method  == req->method   &&
+         fmt->ping.methval == req->methval ) {
+        req->action = fmt->ping.action ;
+        return 0 ;
+    }
+
+    return -1 ;
+
+}
+
+
+/* *************************************************************
+
+   Function: cnvhdfmt - Convert Xport Transmission Header
+
+   Description:
+
+      This function will convert the Xport transmission header
+      from one format to another. This conversion enables
+      Xport headers to be of varying formats and versions to
+      be managed in a common format.  Convsersions then occur
+      to and from the common format.
+
+   Method:
+
+      Each field defined in the targat header format is
+      located in the source header format.  If the field
+      does not exist in the source header execution continues
+      with the next field.  The source field is converted into
+      the target data format and moved to the appropriate
+      location within the target header buffer.
+
+   Parameters: addr of source header format structure
+               addr of target header format strcuture
+               addr of source header buffer
+               addr of target header buffer
+
+   Returns:    CONV_OK   - Conversion successful
+               CONV_FAIL - Conversion failed
+
+   ************************************************************* */
+
+int cnvhdfmt( struct xhdrfmt *srchdr,
+              struct xhdrfmt *tgthdr,
+              char   *source,
+              char   *target         ) {
+
+    int    flds  ;
+    char   *tval, *sval ;
+
+    struct xhdrfld *srcfld ;
+    struct xhdrfld *tgtfld ;
+
+/*  ------------------------------------------------------------
+    Fail request if header formats or buffers not provided.
+    ------------------------------------------------------------ */
+    if ( !srchdr ÝÝ !tgthdr ÝÝ !source ÝÝ !target )
+        return CONV_FAIL ;
+
+/*  ------------------------------------------------------------
+    Initialize target header buffer.
+    ------------------------------------------------------------ */
+    memset( target, 0, tgthdr->hdrlen ) ;
+
+/*  ------------------------------------------------------------
+    Process each target header format field definition entry.
+    ------------------------------------------------------------ */
+    tgtfld = tgthdr->first ;
+
+    for ( flds = tgthdr->fldentct ; flds ; flds--, tgtfld++ ) {
+        if ( srcfld = lochdfld( srchdr, tgtfld->name ) ) {
+
+            sval = fldorig( srcfld, source ) ;
+            tval = fldorig( tgtfld, target ) ;
+
+            if ( (! (srcfld->opts & FIXVALUE) ) ÝÝ
+                 valmatch( srcfld, sval ) )
+
+                if ( ! cnvfld( srcfld, tgtfld, sval, tval ) )
+                    return CONV_FAIL ;
+        }
+    }
+
+    return CONV_OK ;
+}
+
+/* *************************************************************
+
+   Function: fldorig - locate field origin in header
+
+   ************************************************************* */
+
+char * fldorig( struct xhdrfld *fld, char *hdrbuff ) {
+
+    return ( hdrbuff + fld->offset ) ;
+
+}
+
+/* *************************************************************
+
+   Function: valmatch - Validate value match in source header
+
+   ************************************************************* */
+
+int valmatch( struct xhdrfld *fld, char *val ) {
+
+    unsigned char x ;
+
+    if ( fld->length == 1 )
+        if ( ( fld->fldtype == TYPE_BOOL ) ÝÝ
+             ( ! (fld->opts & MUTEXCL) ) )    {
+            if ( ( x = *val & fld->value ) && ( x == fld->value ) )
+                return TRUE ;
+        }
+        else
+            if ( *val == fld->value )
+                return TRUE ;
+
+    return FALSE ;
+
+}
+
+/* *************************************************************
+
+   Function: cnvfld - Convert field value
+
+   ************************************************************* */
+
+int cnvfld( struct xhdrfld *srcfld,
+            struct xhdrfld *tgtfld,
+            char   *srcval,
+            char   *tgtval         ) {
+
+    char  *sval, *tval, *cp ;
+    short *sp ;
+    long  l, *lp ;
+
+/*  ------------------------------------------------------------
+    Assign target / source pointers
+    ------------------------------------------------------------ */
+    tval = tgtval ;
+
+    if ( tgtfld->opts & FIXVALUE )
+        sval = &tgtfld->value ;
+    else
+        sval = srcval ;
+
+/*  ------------------------------------------------------------
+    Copy source value to target value
+    ------------------------------------------------------------ */
+    switch ( tgtfld->fldtype ) {
+
+        case TYPE_CHAR:
+        case TYPE_BIN:
+
+            memcpy( tval, sval, tgtfld->length ) ;
+            break ;
+
+        case TYPE_BOOL:
+            if ( ( srcfld->opts & FIXVALUE )    ||
+                 ( srcfld->fldtype == TYPE_BOOL &&
+                   *sval & srcfld->value ) )
+
+                if ( tgtfld->opts & MUTEXCL )
+                    *tval  = tgtfld->value ;
+                else
+                    *tval Ý= tgtfld->value ;
+            break ;
+
+        case TYPE_INT:
+            if      ( srcfld->length == 1 )
+                l = *( (char *)  sval ) ;
+            else if ( srcfld->length == 2 )
+                l = *( (short *) sval ) ;
+            else if ( srcfld->length == 4 )
+                l = *( (long *)  sval ) ;
+            else
+                return FALSE ;
+
+            if      ( tgtfld->length == 1 ) {
+                cp   = (char *)  tval ;
+                *cp  = l ;
+            }
+            else if ( tgtfld->length == 2 ) {
+                sp   = (short *) tval ;
+                *sp  = l ;
+            }
+            else if ( tgtfld->length == 4 ) {
+                lp   = (long *) tval ;
+                *lp  = l ;
+            }
+            else
+                return FALSE ;
+            break ;
+
+        default:
+            return FALSE ;
+    }
+
+    return TRUE ;
+}

@@ -1,0 +1,349 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>************************************************************/
+/*                                                                   */
+/*    Function: ITCPSSRV - Integrator TCP/IP Super Server part1      */
+/*                                                                   */
+/* Description: This program implements the "listener" function on   */
+/*              the port that is configured by PORT(x) in parmfile.  */
+/*              The program sets up to listen on the port and when   */
+/*              a connection is received it passes the new socket    */
+/*              off to module ITCPSRCV (which is the Super Server    */
+/*              part 2) for completion of the connection process.    */
+/*                                                                   */
+/*  Parameters:                                                      */
+/*                                                                   */
+/*     Returns:                                                      */
+/*                                                                   */
+/*<DOC-OFF>***********************************************************/
+
+/*********************************************************************/
+/*                                                                   */
+/* MAINTENANCE:                                                      */
+/*                                                                   */
+/*   11/17/95 Randy Witek - implement an error counter so that       */
+/*                          a single ACCEPT error does not cause the */
+/*                          Super Server to shutdown.                */
+/*                                                                   */
+/*********************************************************************/
+
+/*-------------------------------------------------------------------*/
+/* Compile-time definitions                                          */
+/*-------------------------------------------------------------------*/
+
+#define error_maximum 50 /* max consecutive accept error */
+
+/*-------------------------------------------------------------------*/
+/* Header Files                                                      */
+/*-------------------------------------------------------------------*/
+
+#include "tcpincl.h"
+#include "sockincl.h"
+#include "env.h"
+#include "msg.h"
+#include "stgmgr.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*-------------------------------------------------------------------*/
+/* Internal Function Prototypes                                      */
+/*-------------------------------------------------------------------*/
+
+static void logmsg
+            (
+            char                   *message,
+            int                     msgnum
+            );
+
+static void tcpenmsg
+            (
+            char                   *tcp_functionname,
+            int                     tcp_errno
+            );
+
+/*********************************************************************/
+/* Function: ITCSSRV - Integrator SuperServer Part1                  */
+/*********************************************************************/
+
+void   ITCSSRV(          char     *parm_applname,
+                         long int *parm_length,
+                         char     *parm_string,
+                unsigned long int *parm_socket,
+                unsigned long int *parm_port,
+                unsigned long int *parm_hostaddr)
+
+{
+
+/*-------------------------------------------------------------------*/
+/* variable declarations                                             */
+/*-------------------------------------------------------------------*/
+
+unsigned char               newentí8ù;
+unsigned char               msg_bufferí120ù;
+unsigned char               dotformí16ù;
+int                         rc;
+int                         ns;
+int                         s;
+int                         error_value;
+int                         error_counter;
+int                         namelen;
+int                         dotlen;
+unsigned short              port;
+unsigned int                portlong;
+struct sockaddr_in          client;
+struct sockaddr_in          server;
+struct sockaddr_in          home;
+
+/*-------------------------------------------------------------------*/
+/* BEGIN EXECUTION                                                   */
+/*-------------------------------------------------------------------*/
+
+sprintf(msg_buffer, "SuperServer ITCPSSRV: starting\n");
+logmsg(msg_buffer,901);
+
+/* Obtain the port                                                   */
+/*-------------------------------------------------------------------*/
+
+memcpy(&portlong,parm_port,4);
+port = portlong;
+
+/* Put the server information into the server structure.             */
+/* The port must be put into network byte order.                     */
+/*-------------------------------------------------------------------*/
+
+server.sin_family      = AF_INET;
+server.sin_addr.s_addr = INADDR_ANY;
+server.sin_port        = htons(port);
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSSRV: host address %x and port %d will be used\n",
+   ntohl(server.sin_addr.s_addr),
+   ntohs(server.sin_port));
+logmsg(msg_buffer,901);
+
+/* Find out the default home internet address for this host          */
+/*-------------------------------------------------------------------*/
+
+home.sin_addr.s_addr = gethostid();
+dotlen = sizeof(dotform);
+if (inet_ntoax(&home.sin_addr, &dotformí0ù, &dotlen) < 0)
+  {
+    error_value = 0;
+    tcpenmsg("INET_NTOAX",error_value);
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSSRV: default home internet address is %s\n",
+   dotform);
+logmsg(msg_buffer,901);
+
+/* Get a stream socket for an Integrator "server" (e.g. primary path)*/
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSSRV: issuing socket_server\n",0);
+
+if ((s = socket_server(AF_INET, SOCK_STREAM, 0)) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SOCKET_SERVER",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPSSRV: socket %d will be used\n",s);
+logmsg(msg_buffer,901);
+
+/* Bind the socket to the server address                             */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSSRV: issuing bind\n",0);
+
+if (bind(s, (struct sockaddr *)&server, sizeof(server)) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("BIND",error_value);
+    goto abort_socket;
+  }
+
+/* Issue listen to create a passive socket                           */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSSRV: issuing listen\n",0);
+
+if (listen(s, 50) != 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("LISTEN",error_value);
+    goto abort_socket;
+  }
+
+/*-------------------------------------------------------------------*/
+/* Main loop to continuously accept and process clients              */
+/*-------------------------------------------------------------------*/
+
+error_counter = 0;
+
+while (1)
+
+  {
+
+/* If we have had too many consecutive errors...abort the server     */
+/*-------------------------------------------------------------------*/
+
+    if (error_counter >= error_maximum)
+
+      {
+        logmsg("Maximum ACCEPT errors occurred",900);
+        goto abort_socket;
+      }
+
+/* Issue accept to create a connection                               */
+/*-------------------------------------------------------------------*/
+
+    logmsg("SuperServer ITCPSSRV: issuing accept\n",0);
+
+    namelen = sizeof(client);
+
+    if ((ns = accept(s, (struct sockaddr *)&client, &namelen)) < 0)
+
+      {
+        error_counter++;
+        error_value = sock_errno();
+        tcpenmsg("ACCEPT",error_value);
+        if (error_value = EIUCVERR)
+          {
+            goto abort_socket;
+          }
+      }
+
+    else
+
+      {
+
+/* Issue givesocket to pass the accepted connection to Part 2        */
+/*-------------------------------------------------------------------*/
+
+        error_counter = 0;
+
+        logmsg("SuperServer ITCPSSRV: issuing givesocket\n",0);
+
+        if (givesocket(ns) < 0)
+          {
+            error_value = sock_errno();
+            tcpenmsg("GIVESOCKET",error_value);
+            goto abort_socket;
+          }
+
+/* Issue Integrator "start_application" to initiate SuperServer Part2*/
+/*-------------------------------------------------------------------*/
+
+        logmsg("SuperServer ITCPSSRV: issuing start_application\n",0);
+
+        start_application(    "ITCPSRCV", /*&appl name      */
+                              0,          /*&no parmlength  */
+                              0,          /*&no parmstring  */
+                              "PROC",     /*&workunit type  */
+                              0,          /*&port           */
+                              0,          /*&host address   */
+                              &ns,        /*&socket#        */
+                              0,          /*&socket token   */
+                              newent,     /*&ent tkn return */
+                              &rc);       /*&retcode return */
+
+        if (rc != 0)
+          {
+            tcpenmsg("START_APPLICATION",rc);
+            goto abort_socket;
+          }
+
+      }
+/*-------------------------------------------------------------------*/
+/* End of main loop                                                  */
+/*-------------------------------------------------------------------*/
+
+  }
+
+/* Issue termination message                                         */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPSSRV: ended normally",901);
+
+/* Return to caller                                                  */
+/*-------------------------------------------------------------------*/
+
+return;
+
+/* Abort the socket(s)                                               */
+/*-------------------------------------------------------------------*/
+
+abort_socket:
+
+logmsg("*** SuperServer ITCPSSRV: ended ABNORMALLY ***",900);
+
+return;
+
+/*-------------------------------------------------------------------*/
+/* End of main program                                               */
+/*-------------------------------------------------------------------*/
+
+}
+
+/*********************************************************************/
+/* Function: tcpenmsg                                                */
+/*********************************************************************/
+
+static void tcpenmsg(char                    *tcp_functionname,
+                     int                      tcp_errno)
+{
+   unsigned char               msg_bufferí120ù;
+   unsigned char *             error_desc;
+   int                         error_desc_length;
+   MSGH                        msg_msgh;
+
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+   sock_errdesc(tcp_errno, &error_desc, &error_desc_length);
+
+   sprintf(msg_buffer,
+           "ITCPSSRV function %s - %s",
+           tcp_functionname,
+           error_desc);
+
+   msg(&msg_msgh, 900, 1, msg_buffer, strlen(msg_buffer));
+
+   return;
+}
+
+/*********************************************************************/
+/* Function: logmsg                                                  */
+/*********************************************************************/
+
+static void logmsg(char                       *message,
+                   int                         msgnum)
+{
+
+   MSGH                        msg_msgh;
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+   msg(&msg_msgh, msgnum, 1, message, strlen(message));
+   return;
+}

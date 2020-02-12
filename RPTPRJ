@@ -1,0 +1,4509 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Module: RPTPRJ - Project Report                                    */
+/*                                                                    */
+/* Description:                                                       */
+/*                                                                    */
+/*   Project Report produces a detailed report of a project con-      */
+/*   sisting of 3 sections; "Messages and Legends", "Screen Detail",  */
+/*   and several cross references.  The report's primary section is   */
+/*   "Screen Detail" which contains screen related information for    */
+/*   each screen of the project.  The project must be previously      */
+/*   open for workbench access to produce this report (not checked).  */
+/*                                                                    */
+/*   The first section is "Messages and Legends".  The messages       */
+/*   issued by the NAVBUILD routines during the contstruction of the  */
+/*   STN (state transition node) network are reported in this         */
+/*   section.  The STN network is the report's primary data source.   */
+/*   The legends provide a brief "decoding" guide to select detail    */
+/*   groups written in the "Screen Detail" section that follows.      */
+/*   The messages and legends may be independently excluded from      */
+/*   the report via the Project Report options string.                */
+/*                                                                    */
+/*   The "Screen Detail" section is sequenced by screen/screen set    */
+/*   name.  The following list summarizes, in order, the details      */
+/*   reported for each screen/screen set of the project:              */
+/*                                                                    */
+/*     Recordings                                                     */
+/*       Lists each recording name, with application name and         */
+/*       logmode, that contains the screen.                           */
+/*                                                                    */
+/*     Attributes                                                     */
+/*       Lists screen attributes (e.g Clear screen, Exception         */
+/*       screen, Conditional screen, et al).                          */
+/*                                                                    */
+/*     Predecessors                                                   */
+/*       Lists the screens which can transit to the screen.           */
+/*                                                                    */
+/*     Successors                                                     */
+/*       Lists the screens to which the screen can transit.           */
+/*                                                                    */
+/*     Stored keystrokes                                              */
+/*       Lists, for each successor, the stored keystrokes.            */
+/*                                                                    */
+/*     Regions                                                        */
+/*       Lists the regions defined for the screen.                    */
+/*                                                                    */
+/*     Variables                                                      */
+/*       Lists the variables defined for the screen.                  */
+/*                                                                    */
+/*     Query types                                                    */
+/*       Lists the variables' relationships to the appropriate table  */
+/*       column for Select, Insert, Update, and Delete query types.   */
+/*                                                                    */
+/*     Screen Image                                                   */
+/*       Displays the screen image.                                   */
+/*                                                                    */
+/*   Each of the above detail groups may be excluded from the report  */
+/*   through the Project Report options string.  In addition, many    */
+/*   of the groups may be written in a SNAP format.  For some items,  */
+/*   the SNAP format provides more information than is available in   */
+/*   the report format.  Also, if the project report abends due to    */
+/*   formattng errors or bad data in its data source, the SNAP format */
+/*   may be used to provide project screen details or to aid the      */
+/*   identification of data source or report formatting problems.     */
+/*                                                                    */
+/*   The final report section consists of the following cross         */
+/*   references:                                                      */
+/*                                                                    */
+/*     Recording/Screen                                               */
+/*       Lists the screens, with their report page number, in each    */
+/*       project recording, ordered by recording name.                */
+/*                                                                    */
+/*     Table/Screen                                                   */
+/*       Lists the screens, with their report page number, for each   */
+/*       referenced table in the project, ordered by table name.      */
+/*                                                                    */
+/*     Screen List                                                    */
+/*       Lists the screens with their page numbers.                   */
+/*                                                                    */
+/*   Each of these cross references may be excluded from the report   */
+/*   via the Project Report options string.  These cross references   */
+/*   are available even if all Screen detail is excluded, however,    */
+/*   page numbers will not be reported in this case.                  */
+/*                                                                    */
+/* Method:                                                            */
+/*                                                                    */
+/*   The following services are utilized by this module:              */
+/*   - command-scan and parameter posting service                     */
+/*   - storage manager (stgmgr)                                       */
+/*   - navigation-build service                                       */
+/*   - report services (Rpt functions)                                */
+/*   - report list services (RptLst functions)                        */
+/*   - fixed-length entry storage management services (Blk functions) */
+/*   - variable-length entry storage management services (Vsa funcs.) */
+/*   - table services (Tbs functions)                                 */
+/*   - image services                                                 */
+/*   - stored keystroke services                                      */
+/*                                                                    */
+/*   Main execution proceeds as follows:                              */
+/* (Initialization phase)                                             */
+/*   - The project report options are processed using the command-    */
+/*     scan and parameter posting service.  This step establishes     */
+/*     the report's contents.                                         */
+/*   - The primary storage queue is established via the storage       */
+/*     manager.  Project Report's working storage (control blocks)    */
+/*     are allocated from this queue.                                 */
+/*   - Open the report for the supplied device using the supplied     */
+/*     formatting options.                                            */
+/*   - Build the report's primary data source, the STN network via    */
+/*     NAVBUILD.  Also, some needed project data is retrieved from    */
+/*     the open project's control blocks.                             */
+/*   - Set the report's primary title lines.                          */
+/* (minor Reporting phase)                                            */
+/*   - Report any messages issued by the STN network construction     */
+/*     process.                                                       */
+/*   - Report the legends.                                            */
+/* (Initialization phase continuationn)                               */
+/*   - Open the sysdictionary tables: sysnavigation, sysrecordings    */
+/*     and syscolumns via table services and establish storage        */
+/*     managers to maintain syscolumn occurrence retrievals.  These   */
+/*     tables are accessed to provide recording details and to relate */
+/*     variables to columns for the "Screen Detail" and cross         */
+/*     reference sections of the report.                              */
+/*   - Establish the cross reference control area and it's storage    */
+/*     managers used to maintain the cross reference information.     */
+/*   - Establish a report-list manager used by several areas of the   */
+/*     report to perform "report listing" as described in report      */
+/*     listing services.                                              */
+/*   - Establish a fixed-length-entry storage manager to create a     */
+/*     sorted vector of the project's STNs (screens). Populate it     */
+/*     with entries from the STN network and sort it by screen/screen */
+/*     set name.                                                      */
+/* (Reporting phase)                                                  */
+/*   - Report the selected details for each STN (screen).  During,    */
+/*     this phase, cross reference data is also collected. This is    */
+/*     the main phase of processing.  Most of the aforementioned      */
+/*     services are utilized.  To collect screen detail information,  */
+/*     screen images may be loaded and unloaded, stored keystrokes    */
+/*     may be loaded, records may be retrieved from various           */
+/*     sysdictionary tables, data may be added and cleared from       */
+/*     the various storage managers established aboved, etc.  The     */
+/*     STN contents and report options drive this phase of processing.*/
+/*     Report services are used to handle pagination, break titles    */
+/*     report line writing, "report listing" etc.                     */
+/*   - Report the cross reference data collected.                     */
+/* (Termination phase)                                                */
+/*   - Clean up. Release storage, close tables, etc.                  */
+/*                                                                    */
+/* Entry:                                                             */
+/*                                                                    */
+/*   InfoSession report strings structure:                            */
+/*   - to select Project Report options (contents)                    */
+/*   - to control the reporting-device.  This string is not used or   */
+/*     needed by this module.  (It may be anchored in the reporting-  */
+/*     device data structure that is to be passed to the device's     */
+/*     open routine at the time the report is opened.  It is the      */
+/*     device-open routine's responsibility to process this string.)  */
+/*   - to control report format (e.g. lines/page, line width, et al)  */
+/*                                                                    */
+/*   Report-device routines:                                          */
+/*     Provide the open, read, and write routines for the caller-     */
+/*     selected reporting device (e.g. Request Unit, Dos file, et     */
+/*     al). These routines are invoked via report services (Rpt).     */
+/*                                                                    */
+/*   Reporting-device data                                            */
+/*     Data structure passed to the device-open routine during        */
+/*     report open processing.                                        */
+/*                                                                    */
+/* Return:                                                            */
+/*                                                                    */
+/*   none - the report is written to the selected device              */
+/*                                                                    */
+/* Notes:                                                             */
+/*                                                                    */
+/*   - Message handling is needed.  Currently, if a failure occurs,   */
+/*     no message is returned and reporting may or may not continue.  */
+/*   - Add option to report on a list of supplied screens rather      */
+/*     than all screens in the project.                               */
+/*   - Report on the options selected.                                */
+/*   - Ideally, the report headers per STN should be written only if  */
+/*     there is data to report for the screen.  For example, if only  */
+/*     the screen image is selected for reporting and the screen is   */
+/*     *VTAM* then an "empty" screen detail page is written. A need-  */
+/*     to-write headers flag is needed along with logic to honor it.  */
+/*                                                                    */
+/* Maintenance:                                                       */
+/*                                                                    */
+/* 08/18/95  T. Weltzer                                               */
+/*         - changed project execution/navigation variable (Pex) to a */
+/*           structure pointer so that the IPROJ storage queue is     */
+/*           updated in place rather than in a copy.                  */
+/*                                                                    */
+/* 12/01/94  T. Weltzer                                               */
+/*         - Disabled logic that bypassed sksid of 0 and added test   */
+/*           of SKSVEND verb to determine eligibilty of SKS           */
+/*           reporting.                                               */
+/*         - Initialized return code in ReportSks routine.            */
+/*         - Changed ',' to '.' in format specifier string of macro   */
+/*           SKSRGN0.                                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "env.h"                       /* environment                 */
+#include "stgmgr.h"                    /* storage manager             */
+#include "bcb.h"                       /* fixed length storage mgr    */
+#include "vsb.h"                       /* variable length storage mgr */
+#include "rcb.h"                       /* report control block        */
+#include "lcb.h"                       /* report list control block   */
+#include "tkn.h"                       /* object/space token          */
+#include "tbs.h"                       /* table services              */
+#include "iprojx.h"                    /* project execution/navigation*/
+#include "rptcfnc.h"                   /* report functions            */
+#include "nav.h"                       /* navigation structures       */
+#include "systbls.h"                   /* system tables               */
+#include "region.h"                    /* region structures           */
+#include "aid.h"                       /* AID values                  */
+#include "cmdscan.h"                   /* command scan                */
+#include "attrib.h"                    /* attributes                  */
+#include "csp.h"                       /* command scan and post       */
+#include "sks.h"                       /* stored keystroke sequence   */
+
+typedef char tColumnNameZí17ù;         /* null terminated column name */
+typedef char tTableNameZí17ù;          /* null terminated table name  */
+
+/* InfoSession Report option strings */
+typedef struct sIrs                    /* InfoSession Rpt option str  */
+  {
+  char             Formatí256ù;        /* report format options string*/
+  char             Deviceí256ù;        /* report device options str.  */
+  char             Projectí256ù;       /* Prj report options string   */
+  } tIrs;
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Project report options (PRO)                                       */
+/*                                                                    */
+/* Project report options contain a group of flag fields to control   */
+/* the contents of the report.                                        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Notes:                                                             */
+/*   Option fields must be one byte in length due to current restric- */
+/* tions imposed by the parameter posting routine for bit values.     */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+typedef char tPco;                     /* Prj report contents options */
+#define PcoNull         0x00
+#define PcoAtr          0x80           /* write STN attribute data    */
+#define PcoSucc         0x40           /* write successor data        */
+#define PcoPred         0x20           /* write predecessor data      */
+#define PcoScroll       0x10           /* write scroll successor data */
+#define PcoVariables    0x08           /* write variable data         */
+#define PcoRegions      0x04           /* write region data           */
+#define PcoImage        0x02           /* write screen image          */
+#define PcoRelate       0x01           /* write var/col relations     */
+/* any of these flags on requires that the headers per STN be written */
+#define PcoHdr \
+  (PcoAtr | PcoSucc | PcoPred | PcoScroll | PcoVariables | PcoRegions \
+  | PcoImage | PcoRelate)
+
+typedef char tPmc;                     /* more report contents options*/
+#define PmcNull         0x00
+#define PmcMsgs         0x80           /* write nav. build messages   */
+#define PmcLegends      0x40           /* write region/var legend text*/
+#define PmcRsx          0x20           /* write recording/screen xref */
+#define PmcTsx          0x10           /* write table/screen xref     */
+#define PmcSks          0x08           /* write sks                   */
+#define PmcPsl          0x04           /* write project screen list   */
+#define PmcRec          0x02           /* write recordings per stn    */
+/* any of these flags on requires that the headers per STN be written */
+#define PmcHdr \
+  (PmcSks | PmcRec)
+
+typedef char tPso;                     /* Project report snap options */
+#define PsoNull         0x00
+#define PsoSnapStn      0x80           /* snap STN                    */
+#define PsoSnapScrl     0x40           /* snap scroll successors      */
+#define PsoSnapSucc     0x20           /* snap successors             */
+#define PsoSnapPred     0x10           /* snap predecessors           */
+#define PsoSnapVars     0x08           /* snap regions                */
+#define PsoSnapRgns     0x04           /* snap variables              */
+#define PsoSnapImage    0x02           /* snap image                  */
+#define PsoSnapRelate   0x01           /* snap var/col relations      */
+/* any of these flags on requires that the headers per STN be written */
+#define PsoHdr \
+  (PsoSnapStn | PsoSnapScrl | PsoSnapSucc | PsoSnapPred | PsoSnapVars \
+  | PsoSnapRgns | PsoSnapImage | PsoSnapRelate)
+
+typedef char tPms;                     /* more snap options           */
+#define PmsNull         0x00
+#define PmsSnapSks      0x80           /* snap SKS                    */
+#define PmsSnapTbl      0x40           /* snap sysdictionary tables   */
+/* any of these flags on requires that the headers per STN be written */
+#define PmsHdr \
+  (PmsSnapSks)
+
+typedef struct sPro                    /* Project report options      */
+  {
+  tPco             Pco;                /* report contents options     */
+  tPmc             Pmc;                /* more contents options       */
+  tPso             Pso;                /* snap options                */
+  tPms             Pms;                /* more snap options           */
+  } tPro;
+
+#define mInitPro \
+  {PcoNull, PmcNull, PsoNull, PmsNull}
+
+/*--------------------------------------------------------------------*/
+
+typedef int tGscRc;                    /* get-syscolumns return code  */
+#define GscOk    0                     /* no error                    */
+#define GscError 1                     /* error occurred              */
+
+typedef struct sGsc                    /* get-syscolumns control blk. */
+  {
+  tTbs *           Tbs;                /* table services block        */
+  tBcb *           Bcb;                /* fixed length stg. manager   */
+  tBcb *           SortedBcb;          /* sorted ptrs into bcb above  */
+  tVsb *           Vsb;                /* variable length stg. manager*/
+  int              Count;              /* occurrence count            */
+  } tGsc;
+
+/* initializer macro */
+#define mInitGsc \
+  {       \
+  NULLP,  \
+  NULLP,  \
+  NULLP,  \
+  NULLP,  \
+  0       \
+  }
+
+/*--------------------------------------------------------------------*/
+
+typedef int tRrcRc;                    /* report recording retn. code */
+#define RrcOk    0                     /* no error                    */
+#define RrcError 1                     /* error occurred              */
+
+typedef struct sRrc                    /* report recording control blk*/
+  {
+  tTbs *           NavTbs;             /* sysnavigation table service */
+  tTbs *           RecTbs;             /* sysrecording table servicde */
+  } tRrc;
+
+/* initializer macro */
+#define mInitRrc \
+  {       \
+  NULLP,  \
+  NULLP   \
+  }
+
+/*--------------------------------------------------------------------*/
+
+typedef char tSfg;                     /* screen flag                 */
+#define SfgNull      0x00
+#define SfgScreenSet 0x80              /* name is a screen set name   */
+
+/* recording screen xref */
+
+typedef struct sRxe                    /* recording/screen xref entry */
+  {
+  char             Screení16ù;         /* screen name                 */
+  tSfg             Flag;               /* screen flag                 */
+  char             Recordingí16ù;      /* recording name              */
+  tPage            Page;               /* screen's report page number */
+  } tRxe;
+
+typedef struct sTxe                    /* table/screen xref entry     */
+  {
+  char             Screení16ù;         /* screen name                 */
+  tSfg             Flag;               /* screen flag                 */
+  char             Tableí18ù;          /* table referenced by screen  */
+  tPage            Page;               /* screen's report page number */
+  } tTxe;
+
+typedef struct sXca                    /* xref control area           */
+  {
+  tPage            StnPage;            /* current stn's start page    */
+  tBcb *           RsxBcb;             /* recording/screen xref mgr   */
+  tBcb *           TsxBcb;             /* table/screen xref mgr       */
+  } tXca;
+
+#define mInitXca \
+  {              \
+  0,             \
+  NULLP,         \
+  NULLP          \
+  }
+
+tRptRc Xref(                           /* write xrefs                 */
+  tRcb *,                              /* i/  - report control block  */
+  tLcb *,                              /* i/  - list control block    */
+  tXca *,                              /* i/  - xref control area     */
+  tPro *                               /* i/  - project report options*/
+  );
+
+/*--------------------------------------------------------------------*/
+
+tRrcRc ReportRecordings(               /* report on screen's recording*/
+  tRcb *,                              /* i/  - report control block  */
+  tRrc *,                              /* i/  - report recording ctrl */
+  tXca *,                              /* i/  - xref control area     */
+  tPro *,                              /* i/  - project report options*/
+  struct nvstn *                       /* i/  - state transition node */
+  );
+
+
+
+/*--------------------------------------------------------------------*/
+/* convert AID to string                                              */
+/*--------------------------------------------------------------------*/
+
+#define AtosTblEntries 31
+#define ValidAids AtosTblEntries - 1
+
+typedef struct sAts                    /* aid to string table entry   */
+  {
+  char             Aid;
+  char             Stringí8ù;
+  } tAts;
+
+typedef tAts tAtosTblíAtosTblEntriesù;
+
+#define mInitAtosTbl   \
+  {                    \
+  {AID_ENTER,"Enter"}, \
+  {AID_CLEAR,"Clear"}, \
+  {AID_PA1 ,"PA1"}, \
+  {AID_PA2 ,"PA2"}, \
+  {AID_PA3 ,"PA3"}, \
+  {AID_PF1 ,"PF1"}, \
+  {AID_PF2 ,"PF2"}, \
+  {AID_PF3 ,"PF3"}, \
+  {AID_PF4 ,"PF4"}, \
+  {AID_PF5 ,"PF5"}, \
+  {AID_PF6 ,"PF6"}, \
+  {AID_PF7 ,"PF7"}, \
+  {AID_PF8 ,"PF8"}, \
+  {AID_PF9 ,"PF9"}, \
+  {AID_PF10 ,"PF10"}, \
+  {AID_PF11 ,"PF11"}, \
+  {AID_PF12 ,"PF12"}, \
+  {AID_PF13 ,"PF13"}, \
+  {AID_PF14 ,"PF14"}, \
+  {AID_PF15 ,"PF15"}, \
+  {AID_PF16 ,"PF16"}, \
+  {AID_PF17 ,"PF17"}, \
+  {AID_PF18 ,"PF18"}, \
+  {AID_PF19 ,"PF19"}, \
+  {AID_PF20 ,"PF20"}, \
+  {AID_PF21 ,"PF21"}, \
+  {AID_PF22 ,"PF22"}, \
+  {AID_PF23 ,"PF23"}, \
+  {AID_PF24 ,"PF24"}, \
+  {AID_ATTN ,"ATTN"}, \
+  {0x00     ,"Unknown"} \
+  }
+
+static const char * aidtos(char);
+
+/*
+** Function aliases.
+*/
+
+#define ReportStn     RPTSTN
+#define ScrRegion     SCRRGN
+#define SnapRegion    SNPRGN
+#define CompareStn    CMPSTN
+#define ScrImage      SCRIMG
+#define ReportSks     RPTSKS
+#define ReportSnapSks RPTSNSKS
+#define RelateVarCol  RPTRVC
+#define GetSyscolumns RPTGSCOL
+#define RptTables     RPTTBLS
+#define CmpSyscolSel  CMPSEL
+#define CmpSyscolIns  CMPINS
+#define CmpSyscolUpd  CMPUPD
+#define CmpSyscolDel  CMPDEL
+#define CmpRxe        CMPRXE
+#define CmpRxeScr     CMPRXES
+#define CmpTxe        CMPTXE
+
+void RptPrj(                           /* report on a project         */
+  tIrs *,                              /* i/  - Int. report strings   */
+  tRdr *,                              /* i/  - report-device routines*/
+  void *                               /* i/  - device data           */
+  );
+
+tRptRc ReportStn(                      /* report state transition node*/
+  tRcb *,                              /* i/  - report control block  */
+  tLcb *,                              /* i/  - list control block    */
+  tPro *,                              /* i/  - project report options*/
+  struct stghdrq *,                    /* i/  - project-stg anchor    */
+  tGsc *,                              /* i/  - get-syscolumn control */
+  tRrc *,                              /* i/  - report recording ctrl */
+  tXca *,                              /* i/  - xref control area     */
+  tVsb *,                              /* i/  - sks stg mgr           */
+  struct nvstn *                       /* i/  - state transition node */
+  );
+
+tRptRc ScrRegion(                      /* report on region/sub-regions*/
+  tRcb *,                              /* i/  - report control block  */
+  struct rgntry *,                     /* i   - region entry          */
+  int                                  /* i/  - level                 */
+  );
+
+tRptRc SnapRegion(                     /* snap region/sub-regions     */
+  tRcb *,                              /* i/  - report control block  */
+  struct rgntry *,                     /* i   - region entry          */
+  int                                  /* i/  - level                 */
+  );
+
+tRptRc ReportSks(                     /* report on stored keystrokes  */
+  tRcb *,                             /* i/  - report control block   */
+  struct sksstmt *,                   /* i/  - sks statement structure*/
+  struct image *                      /* i/  - S0 image               */
+  );
+
+tRptRc ReportSnapSks(                  /* snap SKS                    */
+  tRcb *,                              /* i/  - report control block  */
+  struct sksstmt *,                    /* i/  - start of SKS          */
+  struct nvstn *,                      /* i/  - stn                   */
+  tVsb *                               /* i/  - sks stg mgr           */
+  );
+
+int CompareStn(                        /* compare STNs                */
+  const void *,                        /* i/  - STN 1                 */
+  const void *                         /* i/  - STN 2                 */
+  );
+
+int CmpSyscolSel(                      /* compare syscol for select   */
+  const void *,
+  const void *
+  );
+
+int CmpSyscolIns(                      /* compare syscol for insert   */
+  const void *,
+  const void *
+  );
+
+int CmpSyscolUpd(                      /* compare syscol for update   */
+  const void *,
+  const void *
+  );
+
+int CmpSyscolDel(                      /* compare syscol for delete   */
+  const void *,
+  const void *
+  );
+
+int CmpRxe(
+  const void *,
+  const void *
+  );
+
+int CmpRxeScr(
+  const void *,
+  const void *
+  );
+
+int CmpTxe(
+  const void *,
+  const void *
+  );
+
+char * memstr(                         /* convert memory to string    */
+  char *,                              /*  /o - target string buffer  */
+  char *,                              /* i/  - memory source         */
+  int,                                 /* i/  - end-of-string char    */
+  int                                  /* i/  - maximum source length */
+  );
+
+tRptRc ScrImage(                       /* display/snap screen image   */
+  tRcb *,                              /* i/  - report control block  */
+  tPro *,                              /* i/  - project report options*/
+  struct nvstn *                       /* i/  - state transition node */
+  );
+
+tRptRc RelateVarCol(                   /* relate variable to column   */
+  tRcb *,                              /* i/  - report control block  */
+  tPro *,                              /* i/  - project report options*/
+  tGsc *,                              /* i/  - get-syscolumn control */
+  tXca *,                              /* i/  - xref control area     */
+  struct nvstn *                       /* i/  - state transition node */
+  );
+
+tGscRc GetSyscolumns(                  /* retrieve & sort syscolumns  */
+  tGsc *           Gsc,                /* i/  - get syscolumns c.b.   */
+  int              (*)(const void *, const void *) /* i/  - compare fn*/
+  );
+
+int RptTables(                         /* report on catalog tables    */
+  tRcb *,                              /* i/  - report control block  */
+  struct stghdrq *,                    /* i/  - storage anchor        */
+  tTkn *                               /* i/  - project space token   */
+  );
+
+/*--------------------------------------------------------------------*/
+
+static void TransSelText(char *, int);
+
+static const char * defstr(char);      /* variable default type to str*/
+
+/*--------------------------------------------------------------------*/
+
+#define SetProjectReportOptions SETPRO
+
+int SetProjectReportOptions(           /* set project report options  */
+  char *,                              /* i/  - keyword command string*/
+  tPro *,                              /* i/o - posted values block   */
+  char *                               /* i/o - error message area    */
+  );
+
+/*--------------------------------------------------------------------*/
+/* convert variable usage to string                                   */
+/*--------------------------------------------------------------------*/
+
+#define VuseTblEntries 4
+#define ValidVuses VuseTblEntries - 1
+
+typedef struct sVus                    /* Variable usage to string    */
+  {
+  char             Type;
+  char             Stringí12ù;
+  } tVus;
+
+typedef tVus tVuseTblíVuseTblEntriesù;
+
+#define mInitVuseTbl        \
+  {                         \
+  {svar_inp, "Input"},      \
+  {svar_out, "Output"},     \
+  {svar_att, "Attribute"},  \
+  {0x00,     "Unknown"}     \
+  }
+
+/*{svar_att, "Attribute"},  \*/
+
+static const char * vusestr(char);     /* Variable usage to string    */
+
+/*--------------------------------------------------------------------*/
+/* convert variable locator method to string                          */
+/*--------------------------------------------------------------------*/
+
+#define VmthTblEntries 3
+#define ValidVmths VmthTblEntries - 1
+
+typedef struct sVmt                    /* Variable method to string   */
+  {
+  char             Type;
+  char             Stringí15ù;
+  } tVmt;
+
+typedef tVmt tVmthTblíVmthTblEntriesù;
+
+#define mInitVmthTbl          \
+  {                           \
+  {svar_pos, "Position"},     \
+  {svar_ctx, "Context"},      \
+  {0x00,     "Undefined"}     \
+  }
+/*
+  {svar_xyz, "Reserved"},     \
+  {svar_pat, "Pattern"},      \
+  {svar_tkn, "Token number"}, \
+*/
+
+static const char * vmthstr(char);     /* Variable method to string   */
+
+/*--------------------------------------------------------------------*/
+/* convert region locator method to string                            */
+/*--------------------------------------------------------------------*/
+
+#define MethTblEntries 4
+#define ValidMeths MethTblEntries - 1
+
+typedef struct sMts                    /* method to string tbl entry  */
+  {
+  char             Type;
+  char             Stringí15ù;
+  } tMts;
+
+typedef tMts tMethTblíMethTblEntriesù;
+
+#define mInitMethTbl             \
+  {                              \
+  {0x00,     "Unclaimed area"},  \
+  {RMHTYPE1, "Coordinates"},     \
+  {RMHTYPE2, "Object locator"},  \
+  {0x00,     "?Unknown"}         \
+  }
+
+static const char * methstr(char);     /* method type to string       */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Local macros.                                                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#define IfNotZero(A,B,operation) \
+  if ((A = B) != 0)              \
+    {                            \
+    operation;                   \
+    }
+
+#define IfNull(A,B,operation) \
+  if ((A = B) == NULLP)       \
+    {                         \
+    operation;                \
+    }
+
+#define MSGQ(A)         \
+  "   %-.*s",           \
+  min(A->Length, 80-3), \
+  &(A->Origin)
+
+/*
+** ScrSetName
+** Intended for use with format strings which supply two %s specifiers
+**
+** Macro
+**   pointer to "" or "+" and pointer to screen name or screen set name
+**
+** Entry
+**   STN - stn of screen
+**   BUF - work buffer to contain screen/screen set name
+**   CPTR - work pointer to character
+*/
+#define ScrSetName(STN, BUF, CPTR)                                   \
+  ((*(CPTR = memstr(BUF+17,(STN)->ssn,' ',16) ) == '\0') ? "" : "+"),\
+  ((*CPTR == '\0') ? memstr(BUF, (STN)->name, ' ', 16) : CPTR)
+
+/*--------------------------------------------------------------------*/
+
+/*
+** STN report line macros
+*/
+
+#define RScr(STN,BUF, CPTR)  \
+  " Screen/set: %s%.16s",    \
+  ScrSetName(STN, BUF, CPTR)
+
+/*
+** Recording, application, logmode
+*/
+
+#define RRcd(STN) \
+  "    Recording: %-.16s", \
+  STN->rec->name
+
+#define RApl(STN) \
+  "    Application: %-.16s", \
+  STN->rec->appid.appl
+
+#define RLog(STN) \
+  "    Logmode: %-.8s", \
+  STN->rec->appid.logmode
+/*--------------------------------------------------------------------*/
+
+#define REC \
+  "    Recordings:"
+
+/*
+#define RECHDR0                                                  \
+  "Name . . . . . . Application. . . Logmode  Source screen. . " \
+  "Target screen. . AID . ."
+*/
+
+#define RECHDR0                                                  \
+  "Name . . . . . . Application. . . Logmode"
+
+#define RECHDR1 \
+  "       "     \
+  RECHDR0
+
+#define RECHDR1A \
+  "  "           \
+  RECHDR0
+
+#define RECHDR                                                   \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle)       \
+  IfNotZero(RptRc, RptWrite(Rcb, 1,  2, RECHDR1), goto ErrWrite) \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, RECHDR1), goto ErrTitle)
+/*
+#define RECLINE(SNAV,SREC)                             \
+  "       %16.16s %16.16s %8.8s %16.16s %16.16s %-7s", \
+  SNAV->snavsrec,                                      \
+  SREC->srecappl,                                      \
+  SREC->srecmode,                                      \
+  SNAV->snavlscr,                                      \
+  SNAV->snavrscr,                                      \
+  aidtos(SNAV->snavaid)
+*/
+#define RECLINE(SNAV,SREC)                             \
+  "       %16.16s %16.16s %8.8s",                      \
+  SNAV->snavsrec,                                      \
+  SREC->srecappl,                                      \
+  SREC->srecmode
+
+#define RECALL(SNAV,SREC)                     \
+  IfNotZero(RptRc,                            \
+  RptWrite(Rcb, 1, 1, RECLINE(SNAV, SREC)), goto ErrWrite)
+
+#define RECTAIL
+
+#define RECTXT00 \
+  "  Recording Legend:"
+#define RECTXT01 \
+  "     Name - Recording name"
+#define RECTXT02 \
+  "     Application - Application name"
+#define RECTXT03 \
+  "     Logmode - VTAM logmode"
+#define RECTXT04 \
+  "     Source screen - input state screen name"
+#define RECTXT05 \
+  "     Target screen - output state screen name"
+#define RECTXT06 \
+  "     AID - AID key causing input-to-output transition"
+
+#define RECTEXT                                                  \
+  IfNotZero(RptRc, RptWrite(Rcb, 2, 4, RECTXT00), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECHDR1A), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT01), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT02), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT03), goto ErrWrite)
+/*
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT04), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT05), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RECTXT06), goto ErrWrite)
+*/
+
+
+/*
+** Attributes
+*/
+
+#define RAtr \
+  "    Attributes:"
+
+#define ATTR01(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_FCLR) == 0) ? ""   : "Clear screen")
+#define ATTR02(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag2 & flag2_MAID) == 0) ? "" : "Conditional")
+#define ATTR03(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_FEND) == 0) ? ""   : "End of recording")
+#define ATTR04(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_EXCP) == 0) ? ""   : "Exception screen")
+#define ATTR05(STN)                                             \
+  "%s",                                                         \
+  (((STN->attrs & attr_ERGN) == 0) ? ""  : "Exception regions")
+#define ATTR06(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_LINE) == 0) ? ""   : "Line mode")
+#define ATTR07(STN)                                             \
+  "%s",                                                         \
+  ((STN->scroll == 0) ?             ""   : "Scroll")
+#define ATTR08(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_FUNF) == 0) ? ""   : "Unformated screen")
+#define ATTR09(STN)                                             \
+  "%s",                                                         \
+  (((STN->flag & flag_FUSO) == 0) ? ""   : "Unsolicited image")
+
+#define ATTR10(STN, BUF, CPTR)         \
+  "Resume %s%s",                       \
+  ScrSetName(((STN)->resume),BUF,CPTR)
+
+#define ATTR10A(STN,BUF,CPTR)                                        \
+  if (STN->resume != NULLP)                                          \
+    {                                                                \
+    IfNotZero(RptRc, RptList(Lcb, ATTR10(STN,BUF,CPTR)),             \
+      goto ErrWrite)                                                 \
+    }
+
+#define ATTR11(STN)                                             \
+  (((STN->flag & (flag_FCLR | flag_FEND | flag_EXCP | flag_LINE \
+  | flag_FUNF | flag_FUSO)) == 0)                               \
+  && ((STN->flag2 & flag2_MAID) == 0)                           \
+  && ((STN->attrs & attr_ERGN) == 0)                            \
+  && (STN->resume == NULLP)                                     \
+  && (STN->scroll == 0))         ?  "N/A" : ""
+/*
+#define RRes(STN,BUF)   \
+  "Resume: %s(%s)",     \
+  memstr(BUF, STN->name, ' ', 16), memstr(BUF+17, STN->ssn, ' ', 16)
+*/
+
+#define ATTRIBUTES(STN,BUF,CPTR) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR01(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR02(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR03(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR04(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR05(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR06(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR07(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR08(STN)), goto ErrWrite) \
+  IfNotZero(RptRc, RptList(Lcb, ATTR09(STN)), goto ErrWrite) \
+  ATTR10A(STN,BUF,CPTR)                                      \
+  IfNotZero(RptRc, RptList(Lcb, ATTR11(STN)), goto ErrWrite)
+
+/*
+** Scroll (see also Successors)
+*/
+
+#define RSrl \
+  "    Scroll"
+
+/*
+** Successors
+*/
+
+#define RSuc(STN) \
+  "    Successors: %d", \
+  STN->nsucc
+
+#define Raig(SUCC)                                    \
+  "       AID: %-.7s  Count: %d  %s %.2s",            \
+  aidtos(SUCC->aid),                                  \
+  SUCC->count,                                        \
+  ((SUCC->cgroup == 0) ? "" : "Conditional Group:"),  \
+  ((SUCC->cgroup == 0) ? "" : (char *)&SUCC->cgroup)
+
+#define RSln(STN,BUF,CPTR) \
+  "%s%.16s",               \
+  ScrSetName(STN,BUF,CPTR)
+
+#define Raid(AID)      \
+  "       AID: %-.7s", \
+  aidtos(AID)
+
+/*
+** Predecessors
+*/
+
+#define RPrd(STN)           \
+  "    Predecessors: %d", STN->npred
+
+/*
+** Regions
+*/
+
+#define RRgn(STN)                        \
+  "    Regions: %d ",                    \
+  STN->rt->Ncount
+/*
+  ((STN->rt == NULLP) ? 0 : STN->rt->Ncount)
+*/
+
+#define RGNHDR0                                     \
+  "Name . . . . . . . . . . ."                      \
+  " Lvl Mth Hrz Vrt Trm Bgd Bwd Dst Req Xcl Idt Spn Xcp"
+
+#define RGNHDR1 \
+  "       "     \
+  RGNHDR0
+
+#define RGNHDR1A \
+  "  "           \
+  RGNHDR0
+
+
+#define RGNHDR \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle)       \
+  IfNotZero(RptRc, RptWrite(Rcb, 1,2, RGNHDR1), goto ErrWrite)   \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, RGNHDR1), goto ErrTitle)
+
+#define RGNTAIL \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle)
+
+#define RGNLINE(RGN,BUF,LVL)                                    \
+  "       %*.*s%-*.*s"                                          \
+  " %3d  %c   %c   %c   %c   %c   %c   %c   %c   %c   %c   %c   %c", \
+  LVL - 1, LVL - 1, " ",         \
+  16 + 10 - (LVL - 1),           \
+  16 + 10 - (LVL - 1),           \
+  memstr(BUF, RGN->name,' ',16), \
+  LVL,                           \
+  *methstr(((struct rmhdr *)((char *)RGN + RGN->meth.offset))->type), \
+  (((RGN->Hrepeat)    == 0) ? ' ' : 'X'), \
+  (((RGN->Vrepeat)    == 0) ? ' ' : 'X'), \
+  (((RGN->Vrptend)    == 0) ? ' ' : 'X'), \
+  (((RGN->background) == 0) ? ' ' : 'X'), \
+  (((RGN->searchbwd)  == 0) ? ' ' : 'X'), \
+  (((RGN->distinct)   == 0) ? ' ' : 'X'), \
+  (((RGN->required)   == 0) ? ' ' : 'X'), \
+  (((RGN->excluded)   == 0) ? ' ' : 'X'), \
+  (((RGN->identify)   == 0) ? ' ' : 'X'), \
+  (((RGN->wrap)       == 0) ? ' ' : 'X'), \
+  (((RGN->exception)  == 0) ? ' ' : 'X')
+
+/*
+  (((RGN->intersect)  == 0) ?  ' ' : 'Y'), \
+  (((RGN->vacuous)    == 0) ?  ' ' : 'Y'), \
+*/
+
+#define RGNALL(RGN,BUF,LVL) \
+  IfNotZero(RptRc,          \
+  RptWrite(Rcb, 1,1, RGNLINE(RGN,BUF,LVL)), goto ErrWrite);
+
+#define RGNTXT00 \
+  "  Region Legend:"
+#define RGNTXT01 \
+  "     Name - Region name, indentation indicates parentage"
+#define RGNTXT01a \
+  "     Lvl - Region nest level"
+#define RGNTXT02 \
+  "     Mth - Locator Method, C=Coordinates, O=Object locator, " \
+  "U=Unclaimed"
+#define RGNTXT03 \
+  "     Hrz - Repeats horizontally"
+#define RGNTXT04 \
+  "     Vrt - Repeats vertically"
+#define RGNTXT05 \
+  "     Trm - Terminates scroll"
+#define RGNTXT06 \
+  "     Bgd - Background region"
+/*
+#define RGNTXT07 \
+  "     Int - Intersection"
+#define RGNTXT08 \
+  "     Ucl - Unclaimed"
+*/
+#define RGNTXT09 \
+  "     Bwd - Search backwards"
+#define RGNTXT10 \
+  "     Dst - Distinct region"
+#define RGNTXT11 \
+  "     Req - Required region"
+#define RGNTXT12 \
+  "     Xcl - Excluded region"
+#define RGNTXT13 \
+  "     Idt - Identification region"
+#define RGNTXT14 \
+  "     Spn - Spans screens"
+#define RGNTXT15 \
+  "     Xcp - Exception region"
+
+#define RGNTEXT \
+  IfNotZero(RptRc, RptWrite(Rcb, 2, 1, RGNTXT00), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 2, RGNHDR1A), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT01), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT01a), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT02), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT03), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT04), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT05), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT06), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT09), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT10), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT11), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT12), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT13), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT14), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT15), goto ErrWrite)
+
+/*
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT07), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, RGNTXT08), goto ErrWrite) \
+*/
+
+/*
+** Variables
+*/
+
+#define RVar(STN) \
+  "    Variables: %d", \
+  STN->var->count
+/*
+  ((STN->var == NULLP) ? 0 : STN->var->count)
+*/
+
+#define VARHDR0                        \
+  "Name . . . . . . Region . . . . . " \
+  " Len Mth Usg Att Def Xap Sed Lit Req"
+
+#define VARHDR1 \
+  "       "     \
+  VARHDR0
+
+#define VARHDR1A \
+  "  "           \
+  VARHDR0
+
+#define VARLINE(SVAR,BUF)                                     \
+  "       %-16.16s %-16.16s"                                  \
+  " %4d  %c   %c   %c   %c   %c   %c   %c   %c",              \
+  memstr(BUF,    SVAR->svarname, ' ', 16),                    \
+  memstr(BUF+17, SVAR->svaregn,  ' ', 16),                    \
+  (int)(SVAR->svarlen),                                       \
+  *vmthstr(SVAR->svarmtyp),                                   \
+  *vusestr(SVAR->svarutyp),                                   \
+  (((SVAR->svarflg1 & svarspan) == 0) ?                       \
+    ' ' : ((SVAR->svarflg1 & svarspat) == 0) ? '1' : 'M'),    \
+  *defstr(SVAR->svaruse),                                     \
+  (((SVAR->svarflg1 & svarf1ma) == 0) ? ' ' : 'X'),           \
+  (((SVAR->svarflg1 & svarf1er) == 0) ? ' ' : 'X'),           \
+  (((SVAR->svarflg1 & svarf1lt) == 0) ? ' ' : 'X'),           \
+  (((SVAR->svarflg1 & svarf1rq) == 0) ? ' ' : 'X')
+
+#define VARHDR                                                   \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle)       \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 2,  VARHDR1), goto ErrWrite) \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, VARHDR1), goto ErrTitle)
+
+#define VARTAIL \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle)
+
+#define VARALL(SVAR,BUF) \
+  IfNotZero(RptRc,       \
+    RptWrite(Rcb, 1, 2, VARLINE(SVAR,BUF)), goto ErrWrite);
+
+#define VARTXT00 \
+  "  Variable Legend:"
+#define VARTXT01 \
+  "     Name - Name of the variable"
+#define VARTXT02 \
+  "     Region - Name of region in which variable is located"
+#define VARTXT03 \
+  "     Len - Length of variable"
+#define VARTXT04 \
+  "     Mth - Locator method, P=Position, C=Context"
+#define VARTXT06 \
+  "     Usg - Usage, I=Input, O=Output, A=Attribute"
+#define VARTXT07 \
+  "     Att - Variable contains, \" \"=none, 1=one or more," \
+  " M=more than one, attribute byte"
+#define VARTXT08 \
+"     Def - Default value, -=none, \" \"=blank, N=null, S=specified"
+#define VARTXT09 \
+  "     Xap - Cross Application"
+#define VARTXT10 \
+  "     Sed - SQL error data"
+#define VARTXT11 \
+  "     Lit - Literal definition"
+#define VARTXT12 \
+  "     Req - Required variable"
+
+#define VARTEXT \
+  IfNotZero(RptRc, RptWrite(Rcb, 2, 1, VARTXT00), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARHDR1A), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT01), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT02), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT03), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT04), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT06), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT07), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT08), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT09), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT10), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT11), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARTXT12), goto ErrWrite)
+
+/*
+** Variable/Column relationships
+*/
+
+#define SCOLVSCR \
+   'S','C','O','L','V','S','C','R',' ',' ',' ',' ',' ',' ',' ',' '
+
+#define SCOLVICR \
+  {'S','C','O','L','V','I','C','R',' ',' ',' ',' ',' ',' ',' ',' '}
+
+#define SCOLVUCR \
+  {'S','C','O','L','V','U','C','R',' ',' ',' ',' ',' ',' ',' ',' '}
+
+#define SCOLVDCR \
+  {'S','C','O','L','V','D','C','R',' ',' ',' ',' ',' ',' ',' ',' '}
+
+#define VARCOLDTLH(HDRSTR,COUNT) \
+  "    %s Query: %d", HDRSTR, COUNT
+
+#define VARCOLHDR0       \
+  "Variable . . . . "    \
+  "Table. . . . . . . "  \
+  "Column . . . . . . "  \
+  "Col# "                \
+  "Len. "                \
+  "Type "                \
+  "Nul "                 \
+  "Usg "                 \
+  "Def "                 \
+  "Ban "                 \
+  "Default value"
+
+#define VARCOLHDR1A      \
+  "  "                   \
+  VARCOLHDR0
+
+#define VARCOLHDR1       \
+  "       "              \
+  VARCOLHDR0
+
+#define VARCOLHDR                                                 \
+  IfNotZero(RptRc,RptSetTitle(Rcb, 21,0), goto ErrTitle)          \
+  IfNotZero(RptRc,RptWrite(Rcb, 1, 2, VARCOLHDR1), goto ErrWrite) \
+  IfNotZero(RptRc,RptSetTitle(Rcb, 21,VARCOLHDR1), goto ErrTitle)
+
+#define VARCOL1(SCOL,SKEY,DEFO,SCOLUSE)            \
+  "       %16.16s %18.18s %18.18s "                \
+  "%4d %4d %4.4s  %c   %c   %c   %c  %-.*s",       \
+  SKEY->skvarnam,                                  \
+  SCOL->scoltbnm,                                  \
+  SCOL->scolname,                                  \
+  (int)SCOL->scolid,                               \
+  (int)SCOL->scollen,                              \
+  (SCOL->scoltype == sc_char) ? "CHAR" :           \
+    (SCOL->scoltype == sc_attr) ? "ATTR" : " INT",  \
+  (SCOL->scolnull != '\0') ?  'X' : ' ',           \
+  ((SCOLUSE & scolu_out) == 0) ? 'I' : 'O',        \
+  ((SCOLUSE & scolu_none) != 0) ? '-' :            \
+    ((SCOLUSE & scolu_blnk) != 0) ? ' ' :          \
+    ((SCOLUSE & scolu_null) != 0) ? 'N' : ' ',     \
+  ((SCOLUSE & scolu_nwb) == 0) ? ' ': 'X',         \
+  (SCOL->scoldflt.len == 0) ? 0 : min(SCOL->scoldflt.len, 20), \
+  (SCOL->scoldflt.len == 0) ?                                  \
+    "" : (char *)(SCOL->scoldflt.offset + (char *)DEFO)
+
+/*
+** SCOL - struct syscols *
+** SKEY - struct skeyvar *
+** DEFO - char * (origin of spill buffer containing default values)
+** SCOLUSE - char * (&SCOL + offset to SCOL->scol?use where ?=s,i,u,d)
+*/
+#define VARCOLALL(SCOL,SKEY,DEFO,SCOLUSE) \
+  IfNotZero(RptRc,                        \
+  RptWrite(Rcb, 1, 1, VARCOL1(SCOL,SKEY,DEFO,SCOLUSE)), goto ErrWrite)
+
+#define VARCOLTAIL                                         \
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle) \
+
+#define VARCOLTXT00 \
+  "  Query Legend:"
+#define VARCOLTXT01 \
+  "     Variable - Name of the variable"
+#define VARCOLTXT02 \
+  "     Table - Name of the table referencing the variable"
+#define VARCOLTXT03 \
+  "     Column - Name of column associated with the variable"
+#define VARCOLTXT04 \
+  "     Col# - Column number"
+#define VARCOLTXT06 \
+  "     Len. - Width of the column, 0 denotes inherit from variable"
+#define VARCOLTXT07 \
+  "     Type - Column datatype, INT=integer, CHAR=character, " \
+  "ATTR=attribute"
+#define VARCOLTXT08 \
+  "     Nul - If marked, column may contain null value"
+#define VARCOLTXT09 \
+  "     Usg - Column usage, I=input, O=output"
+#define VARCOLTXT10 \
+  "     Def - Default value, -=none, \" \"=blank, N=null"
+#define VARCOLTXT11 \
+  "     Ban - If marked, treat blank as null value"
+#define VARCOLTXT12 \
+  "     Default value - first 20 characters of column's default value"
+
+#define VARCOLTEXT \
+  IfNotZero(RptRc, RptWrite(Rcb, 2, 1, VARCOLTXT00), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLHDR1A), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT01), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT02), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT03), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT04), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT06), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT07), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT08), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT09), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT10), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT11), goto ErrWrite) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, VARCOLTXT12), goto ErrWrite)
+
+/*
+** SKS - Stored keystrokes for screen successors (scroll too)
+** Note: For scroll successors only, the AID is in entryí0ù.said
+** Currently only a single scroll successor is allowed.
+*/
+
+/*aidtos(SUCC->aid),  */
+/* ScrSetName...
+  ((*(CPTR = memstr(BUF+17,SUCCSTN->ssn,' ',16) ) == '\0') ? "" : "+"),\
+  ((*CPTR == '\0') ? memstr(BUF, SUCCSTN->name, ' ', 16) : CPTR), \
+*/
+#define SKSHDRSCRL(SUCCSTN,SUCC,BUF,CPTR)                 \
+  "    Stored keystrokes for scroll successor: "          \
+  "%s%.16s AID: %-.7s %s %.2s",                           \
+  ScrSetName(SUCCSTN,BUF,CPTR),                           \
+  aidtos(SUCC->entryí0ù.said),                            \
+  ((SUCC->cgroup == 0) ? "" : "Conditional Group:"),      \
+  ((SUCC->cgroup == 0) ? "" : (char *)&SUCC->cgroup)
+
+/* ScrSetName...
+  ((*(CPTR = memstr(BUF+17,SUCCSTN->ssn,' ',16) ) == '\0') ? "" : "+"),\
+  ((*CPTR == '\0') ? memstr(BUF, SUCCSTN->name, ' ', 16) : CPTR), \
+*/
+#define SKSHDR(SUCCSTN,SUCC,BUF,CPTR)                     \
+  "    Stored keystrokes for successor: "                 \
+  "%s%.16s AID: %-.7s %s %.2s",                           \
+  ScrSetName(SUCCSTN,BUF,CPTR),                           \
+  aidtos(SUCC->aid),                                      \
+  ((SUCC->cgroup == 0) ? "" : "Conditional Group:"),      \
+  ((SUCC->cgroup == 0) ? "" : (char *)&SUCC->cgroup)
+
+#define SKSBLK0(SKS,BUF)                            \
+  "      Start block - %s variable: %s screen: %s", \
+  ((SKS->flags & VAR_REQ) != 0) ? "Required" :      \
+    ((SKS->flags & VAR_LIT) != 0) ? "Literal" : "", \
+  memstr(BUF, SKS->varname, ' ', 16),               \
+  memstr(BUF+17, SKS->stnname, ' ', 16)
+
+/*
+#define SKSBLK(SKS,BUF)                                   \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, SKSBLK0(SKS,BUF)), \
+  goto ErrWrite)
+*/
+#define SKSBLK(SKS,BUF)
+
+#define SKSCSR0(SKS,IMG)                \
+  "      Set cursor at (%d,%d)",        \
+  (long)((SKS->csrp / IMG->cols) + 1),  \
+  (long)((SKS->csrp % IMG->cols) + 1)
+
+#define SKSCSR(SKS,IMG) \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1,SKSCSR0(SKS,IMG)), \
+  goto ErrWrite);
+
+#define SKSEOF0(SKS) \
+  "      Erase Eof"
+
+#define SKSEOF(SKS)                                  \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1,SKSEOF0(SKS)), \
+  goto ErrWrite);
+#define HIDETEXT "(invisible)"
+
+#define SKSTEXT0(SKS)                                        \
+  "      Enter text %s%.*s%s%s%c%c",                         \
+  ((SKS->flags & TEX_FINV) != 0) ? "" : "\"",                \
+  ((SKS->flags & TEX_FINV) != 0) ? sizeof(HIDETEXT)-1 : SKS->textlen, \
+  ((SKS->flags & TEX_FINV) != 0) ? HIDETEXT : SKS->text,     \
+  ((SKS->flags & TEX_FINV) != 0) ? "" : "\"",                \
+  (SKS->padchar == '\0') ? "" : " using pad character \"",   \
+  (SKS->padchar == '\0') ? ' ' : SKS->padchar,               \
+  (SKS->padchar == '\0') ? ' ' : '"'                         \
+
+#define SKSTEXT(SKS)                                   \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, SKSTEXT0(SKS)), \
+  goto ErrWrite);
+
+#define SKSRGN0(SKS)             \
+  "      Locate region %16.16s", \
+  SKS->rgnname
+
+#define SKSRGN(SKS)                                  \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1,SKSRGN0(SKS)), \
+  goto ErrWrite);
+
+#define SKSLOC0(SKS,BUF)                    \
+  "      Locate variable %s%s",             \
+  memstr(BUF, SKS->var->svarname, ' ', 16), \
+  ((SKS->flags & LOC_RGN) == 0) ? "" : " in region"
+
+#define SKSLOC(SKS,BUF)                                  \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1,SKSLOC0(SKS,BUF)), \
+  goto ErrWrite);
+
+#define SKSVAR0(SKS,BUF)                                   \
+  "      Variable input from: %s length %d%s%c%c",         \
+  memstr(BUF, SKS->varname, ' ', 16),                      \
+  (int)SKS->varlen,                                        \
+  (SKS->padchar == '\0') ? "" : " using pad character \"", \
+  (SKS->padchar == '\0') ? ' ' : SKS->padchar,             \
+  (SKS->padchar == '\0') ? ' ' : '"'
+
+#define SKSVAR(SKS,BUF)                                  \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1,SKSVAR0(SKS,BUF)), \
+  goto ErrWrite);
+
+#define SKSXIT0(SKS)  \
+  "      End block"   \
+
+/*
+#define SKSXIT(SKS)                                   \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, SKSXIT0(SKS)), \
+  goto ErrWrite);
+*/
+
+#define SKSXIT(SKS)
+
+#define SKSUKNOWN0(SKS)  \
+  "      Unknown verb encountered. Expansion terminated."
+
+#define SKSUKNOWN(SKS)                                   \
+  IfNotZero(RptRc, RptWrite(Rcb, 1, 1, SKSUKNOWN0(SKS)), \
+  goto ErrWrite);
+
+/*--------------------------------------------------------------------*/
+/*--------------------------------------------------------------------*/
+/*--------------------------------------------------------------------*/
+/*--------------------------------------------------------------------*/
+
+void RptPrj(
+  tIrs *           Irs,                /* i/  - report strings        */
+  tRdr *           Rdr,                /* i/  - report-device routines*/
+  void *           Rud                 /* i/  - report-device data    */
+  )
+
+{
+
+  tRptRc           RptRc;              /* report return code          */
+  tBlkRc           BlkRc;              /* block return code           */
+  tVsaRc           VsaRc;              /* var stg mgr return code     */
+  tTbsRc           TbsRc;              /* table service return code   */
+  long             Rc;                 /* general work return code    */
+  struct stghdrq   StgQ;               /* primary storage anchor      */
+  tBco             Bco;                /* stg mgr control options     */
+  tVso             Vso;                /* stg mgr control options     */
+  tNvb             Nvb;                /* navigation build block      */
+  tPnm             Project;            /* project name                */
+  tTkn *           PrjToken;           /* project space token         */
+  tPex *           Pex;                /* project execution block     */
+  tMsgQE *         MsgQE;              /* message queue entry         */
+  struct nvstn *   Stn;                /* state transition node       */
+  int (*           stgallc)();         /* storage allocator           */
+  int (*           stgfree)();         /* storage releaser            */
+  int              Count;              /* work counter                */
+  char             bufferí100ù;        /* general work buffer         */
+
+  tRcb *           Rcb = NULLP;        /* report control block        */
+  tLcb *           Lcb = NULLP;        /* report list control block   */
+  tBcb *           Bcb = NULLP;        /* stg mgr control block       */
+  tVsb *           SksVsb = NULLP;     /* stg mgr control block       */
+  tPro             Pro = mInitPro;     /* project report options      */
+  tGsc             Gsc = mInitGsc;     /* get-syscolumn control area  */
+  tRrc             Rrc = mInitRrc;     /* report recording control    */
+  tXca             Xca = mInitXca;     /* xref control area           */
+  tLco             Lco =               /* report-list control options */
+    {(LcfNoNull | LcfTabOn),
+    LejNone, 1, 0, 0, 0, 20, NULLP, NULLP, NULLP, NULLP, NULLP};
+
+  static const char InternalFormatíù = /* required internal options   */
+    " MINWIDTH(80) MINLINES(15) SPCCALL GRPCALL "
+    "NUMBER ";                /*  ?     ?     ? */
+
+  static const tTableNameZ TableSyscolumn =
+  "SYSCOLUMNS      ";
+/* ----+----+----+- */
+  static const tTableNameZ TableSysnavigation =
+  "SYSNAVIGATION   ";
+
+  static const tTableNameZ TableSysrecordings =
+  "SYSRECORDINGS   ";
+
+  /*
+  ** Process report option string.
+  */
+
+  Rc = SetProjectReportOptions(        /* set project report options  */
+    Irs->Project,                      /* i/  - keyword command string*/
+    &Pro,                              /* i/o - posted values block   */
+    buffer                             /* i/o - error message area    */
+    );
+
+  if (Rc != 0)
+    {
+/* handle bad Rc */
+    }
+
+  /*
+  ** Initialize storage queue
+  */
+
+  stgallc = (int (*)())getfunc("XALOC31");
+  stgfree = (int (*)())getfunc("XFREE");
+
+  stginit(                             /* initialize storage queue    */
+    &StgQ,                             /* i/o - storage queue         */
+    4096,                              /* i/  - block size            */
+    stgallc,                           /* i/  - allocation routine    */
+    stgfree,                           /* i/  - release routine       */
+    0                                  /* i/  - lock routine          */
+    );
+/* check that stginit is ok */
+
+  /*
+  ** Open report
+  */
+
+  strcat(Irs->Format, InternalFormat); /* append internal requirements*/
+
+  IfNull(Rcb,                          /*  /o - report control block  */
+    RptOpen(                           /* open report                 */
+    &StgQ,                             /* i/o - storage queue         */
+    Rdr,                               /* i/  - report device routines*/
+    Rud,                               /* i/  - device data           */
+    Irs->Format,                       /* i/  - format options        */
+    &RptRc                             /* i/o - return code area      */
+    ),
+    goto ErrOpen);
+
+  /*
+  ** Establish Project report's primary data source (stn network).
+  */
+
+  memset(&Nvb, 0, sizeof(tNvb));
+  Pex = 0;
+  /* memset(&Pex, 0, sizeof(tPex)); */
+
+  Nvb.Component = NvbCompRgn;          /* indicate desired pieces     */
+
+  Rc = BuildNavigation(&Nvb);          /* build the pieces            */
+
+  GetProjectData(&Project, &PrjToken, &Pex); /* get misc. prj data    */
+
+  /*
+  ** Set report's title.
+  */
+
+  IfNotZero(RptRc,
+    RptSetTitle(Rcb, 1, "InfoSession Project Report"),
+    goto ErrTitle);
+
+  sprintf(buffer, "Project: %8.8s", Project);
+  IfNotZero(RptRc,
+    RptSetTitle(Rcb, 3, buffer),
+    goto ErrTitle);
+
+
+  if ((Pro.Pms & PmsSnapTbl) != 0)
+    {
+    RptTables(Rcb, &StgQ, PrjToken);   /* snap sysdictionary tables   */
+    }
+
+  /*
+  ** Write navigation-build (stn network construction) messages.
+  */
+
+  if (((Pro.Pmc & PmcMsgs) != 0)       /* messages wanted and ...     */
+    && (Pex->Mcq != NULLP))            /* ... available ?             */
+    {
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, "Messages and Legends"),
+      goto ErrTitle);
+
+    IfNotZero(RptRc,                   /* yes, write messages         */
+      RptWrite(Rcb, 1, 1, "  Messages:"),
+      goto ErrWrite);
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 15,"  Messages (continued)"),
+      goto ErrTitle);
+
+    for (MsgQE = Pex->Mcq->First;
+      MsgQE != NULLP;
+      MsgQE = MsgQE->Next)
+      {
+      IfNotZero(RptRc,
+        RptWrite(Rcb, 1, 1, MSGQ(MsgQE)),
+        goto ErrWrite);
+      } /* for */
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, 0),
+      goto ErrTitle);
+    }
+
+  /*
+  ** Write legend text.
+  */
+
+  if ((Pro.Pmc & PmcLegends) != 0)     /* legends wanted ?            */
+    {
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, "Messages and Legends"),
+      goto ErrTitle);
+
+    RECTEXT;                           /* yes, write legends          */
+    RGNTEXT;
+    VARTEXT;
+    VARCOLTEXT;
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, 0),
+      goto ErrTitle);
+    }
+
+  /*
+  ** Open sysnavigation and sysrecordings tables.
+  */
+
+/* should test option flags to do only that which is needed */
+
+  IfNull(Rrc.NavTbs,
+    TbsOpen(&StgQ, PrjToken,
+    (tTableName *)TableSysnavigation, &TbsRc),
+    goto ErrTbsOpen);
+
+  IfNull(Rrc.RecTbs,
+    TbsOpen(&StgQ, PrjToken,
+    (tTableName *)TableSysrecordings, &TbsRc),
+    goto ErrTbsOpen);
+
+  /*
+  ** Establish get-syscolumn control block to manage syscolumn
+  ** retrievals.
+  */
+
+  IfNull(Gsc.Tbs,                      /* open syscolumns             */
+    TbsOpen(&StgQ, PrjToken,
+    (tTableName *)TableSyscolumn, &TbsRc),
+    goto ErrTbsOpen);
+
+  Bco.Length = sizeof(struct syscols);
+  Bco.Count = 256;
+  Bco.Alignment = 4;
+
+  IfNull(Gsc.Bcb,                      /* syscol occurrence stg mgr   */
+    BlkInit(&StgQ, &Bco, &BlkRc),
+    goto ErrBlkInit);
+
+  Bco.Length = sizeof(struct syscols *);
+  Bco.Count = 256;
+  Bco.Alignment = 4;
+
+  IfNull(Gsc.SortedBcb,                /* sorted-syscol-ptrs stg mgr  */
+    BlkInit(&StgQ, &Bco, &BlkRc),
+    goto ErrBlkInit);
+
+  Vso.Length = 256;                    /* initial/expansion length    */
+  Vso.MaxLength = 132*27;              /* maximum sized entry         */
+  Vso.Vcf = VcfNull;                   /* incremental growth          */
+
+  IfNull(Gsc.Vsb,                      /* syscol variable data stg mgr*/
+    VsaInit(&StgQ, &Vso, &VsaRc),
+    goto ErrVsaInit);
+
+  /*
+  ** Initialize variable length storage manager to create a modifiable
+  ** SKS.  Invisible text fields are altered to maintain security.
+  */
+
+  Vso.Length = 1000;                   /* initial/expansion length    */
+  Vso.MaxLength = 0x7fffffff;          /* max entry - VERY BIG        */
+  Vso.Vcf = VcfNull;                   /* incremental growth          */
+
+  IfNull(SksVsb,                       /* stg mgr for modifiable SKS  */
+    VsaInit(&StgQ, &Vso, &VsaRc),
+    goto ErrVsaInit);
+
+  /*
+  ** Establish xref control area.
+  */
+
+  Bco.Length = sizeof(tRxe);
+  Bco.Count = 256;
+  Bco.Alignment = 1;
+
+  IfNull(Xca.RsxBcb,                   /* rec./screen xref stg mgr    */
+    BlkInit(&StgQ, &Bco, &BlkRc),
+    goto ErrBlkInit);
+
+  Bco.Length = sizeof(tTxe);
+  Bco.Count = 256;
+  Bco.Alignment = 1;
+
+  IfNull(Xca.TsxBcb,                   /* table/screen xref stg mgr   */
+    BlkInit(&StgQ, &Bco, &BlkRc),
+    goto ErrBlkInit);
+
+  /*
+  ** Establish report-list manager for list-controlled report
+  ** writing.
+  */
+
+  Lco.PadPrefix = "";                  /* list entry's pad prefix     */
+  Lco.PadSuffix = "";                  /* list entry's pad suffix     */
+  Lco.Prefix = "       ";              /* list line's prefix          */
+  Lco.Suffix = "";                     /* list line's suffix          */
+  Lco.Delimitter = "  ";               /* inter list entry delimitter */
+
+  IfNull(Lcb,                          /*  /o - list control block    */
+    RptListStart(                      /* start report list           */
+    Rcb,                               /* i/  - report control block  */
+    &Lco,                              /* i/  - list control options  */
+    &RptRc),                           /*  /o - return code           */
+    goto ErrLstStart);
+
+  /*
+  ** Establish fixed-length-entry storage manager to create a sorted
+  ** vector of STNs.
+  */
+
+  Bco.Length = sizeof(Stn);            /* entry's length              */
+  Bco.Count = 256;                     /* unit of entry allocations   */
+  Bco.Alignment = 4;                   /* entry alignment requirements*/
+
+  IfNull(Bcb,                          /* returned block control block*/
+    BlkInit(                           /* initialize block allocation */
+    &StgQ,                             /* i/  - storage queue         */
+    &Bco,                              /* i/  - block control options */
+    &BlkRc                             /*  /o - return code           */
+    ),
+    goto ErrBlkInit);
+
+  /*
+  ** Populate stg mgr with STN pointers and sort (by screen name).
+  */
+
+  for (Stn = Pex->All, BlkRc = 0, Count = 0;
+    (Stn != NULLP) && (BlkRc == 0);
+    Stn = Stn->list, Count++)
+    {
+    BlkRc = BlkAdd(                    /* add STN to storage block    */
+      Bcb,                             /* i/  - block control block   */
+      &Stn                             /* i/  - address of data to add*/
+      );
+    }
+/* handle (unlikely) bad BlkRc */
+
+  BlkSort(Bcb, CompareStn);            /* Sort. Entry 0 beomes current*/
+
+  /*
+  ** Report on STNs.
+  */
+
+  IfNotZero(RptRc,
+    RptSetTitle(Rcb, 4, "Screen Detail"),
+    goto ErrTitle);
+
+  for (Rc = 0; ((Rc == 0) && (Count > 0)); Count--)
+    {
+    BlkGet(Bcb, &Stn);                 /* retrieve next STN           */
+    Rc = ReportStn(                    /* report on STN               */
+      Rcb,                             /* i/  - report control block  */
+      Lcb,                             /* i/  - list control block    */
+      &Pro,                            /* i/  - project report options*/
+      &Pex->StgQ,                      /* i/  - project stg anchor    */
+      &Gsc,                            /* i/  - get-syscolumn control */
+      &Rrc,                            /* i/  - report-recording ctrl */
+      &Xca,                            /* i/  - xref control area     */
+      SksVsb,                          /* i/  - sks stg mgr           */
+      Stn                              /* i/  - STN                   */
+      );
+    } /* for */
+
+  IfNotZero(RptRc, RptSetTitle(Rcb, 4, 0), goto ErrTitle);
+
+ RptRc = Xref(Rcb, Lcb, &Xca, &Pro);   /* write collected xref data   */
+
+  /*
+  ** Clean up
+  */
+
+ErrBlkInit:                            /* stg mgr initialization error*/
+ErrVsaInit:                            /* stg mgr initialization error*/
+ErrTbsOpen:                            /* table open error            */
+ErrOpen:                               /* report open error           */
+ErrTitle:                              /* set report title error      */
+ErrWrite:                              /* write report data error     */
+ErrLstStart:                           /* start list error            */
+
+  if (Xca.RsxBcb != NULLP)
+    {
+    BlkTerm(Xca.RsxBcb);               /* terminate stg mgr           */
+    }
+
+  if (Xca.TsxBcb != NULLP)
+    {
+    BlkTerm(Xca.TsxBcb);               /* terminate stg mgr           */
+    }
+
+  if (Rrc.NavTbs != NULLP)
+    {
+    TbsClose(Rrc.NavTbs);              /* close table                 */
+    }
+
+  if (Rrc.RecTbs != NULLP)
+    {
+    TbsClose(Rrc.RecTbs);              /* close table                 */
+    }
+
+  if (Gsc.Tbs != NULLP)
+    {
+    TbsClose(Gsc.Tbs);                 /* close table                 */
+    }
+
+  if (Gsc.Bcb != NULLP)
+    {
+    BlkTerm(Gsc.Bcb);                  /* terminate stg mgr           */
+    }
+
+  if (Gsc.SortedBcb != NULLP)
+    {
+    BlkTerm(Gsc.SortedBcb);            /* terminate stg mgr           */
+    }
+
+  if (Gsc.Vsb != NULLP)
+    {
+    VsaTerm(Gsc.Vsb);                  /* terminate stg mgr           */
+    }
+
+  if (SksVsb != NULLP)
+    {
+    VsaTerm(SksVsb);                   /* terminate stg mgr           */
+    }
+
+  if (Bcb != NULLP)
+    {
+    BlkTerm(Bcb);                      /* terminate stg mgr           */
+    }
+
+  if (Lcb != NULLP)
+    {
+    RptListEnd(Lcb);                   /* terminate list manager      */
+    }
+
+  if (Rcb != NULLP)
+    {
+    RptClose(Rcb);                     /* close report                */
+    }
+
+  stgterm(&StgQ);                      /* toss all storage            */
+
+  return;
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write report data for an STN                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc ReportStn(                      /* report on an STN            */
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tLcb *           Lcb,                /* i/  - list control block    */
+  tPro *           Pro,                /* i/  - project report options*/
+  struct stghdrq * PrjStg,             /* i/  - project stg anchor    */
+  tGsc *           Gsc,                /* i/  - get-syscolumn control */
+  tRrc *           Rrc,                /* i/  - report-recording ctrl */
+  tXca *           Xca,                /* i/  - xref control area     */
+  tVsb *           SksVsb,             /* i/  - sks var. len. stg. mgr*/
+  struct nvstn *   Stn                 /* i/  - state transition node */
+  )
+
+{
+
+  tRptRc           RptRc;              /* report return code          */
+  int              Rc;                 /* work return code            */
+  struct nvusucc * Successor;          /* work successor node         */
+  unsigned short   Index;              /* array index                 */
+  char             buffer2í(sizeof(Stn->name)+1)*2ù; /* work buffer   */
+  char             bufferíMaxLineLengthù; /* work buffer              */
+  char *           WorkPtr;            /* work pointer                */
+
+  /*
+  ** Load STN's screen image if needed.
+  */
+
+  if ( ((Pro->Pso & PsoSnapImage) != 0)
+    || ((Pro->Pco & PcoImage) != 0)
+    || ((Pro->Pmc & PmcSks) != 0)
+    || ((Pro->Pms & PmsSnapSks) != 0))
+    {
+    Rc = imgload(                      /* load screen image           */
+      PrjStg,                          /* i/  - project storage queue */
+      Stn                              /* i/  - state transition node */
+      );
+/* check return code */
+    } /* if (((Pro->Pso & PsoSnapImage) ... */
+
+  /*
+  ** New headers & page per STN.
+  */
+
+  if ( ((Pro->Pco & PcoHdr) != 0)
+    || ((Pro->Pmc & PmcHdr) != 0)
+    || ((Pro->Pso & PsoHdr) != 0)
+    || ((Pro->Pms & PmsHdr) != 0))
+    {
+    IfNotZero(RptRc, RptWriteHeaders(Rcb), goto ErrWrite);
+
+    /* write & establish page break line */
+    sprintf(buffer, RScr(Stn, buffer2, WorkPtr));
+    IfNotZero(RptRc, RptWrite(Rcb, 1, 1, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, buffer), goto ErrTitle);
+
+    /* save start page of current stn for xref work */
+    Xca->StnPage = RptCurrentPage(Rcb);
+    }
+
+  /*
+  ** Recording, application, logmode
+  */
+
+  if ((Pro->Pmc & (PmcRec | PmcRsx | PmcPsl)) != 0)
+    {
+    IfNotZero(Rc, ReportRecordings(Rcb,Rrc,Xca,Pro,Stn), goto ErrWrite);
+    }
+
+  /*
+  ** Attributes
+  */
+
+  if ((Pro->Pco & PcoAtr) != 0)
+    {
+    RptListTabOff(Lcb);                /* turn off tab stops          */
+
+    sprintf(buffer, RAtr);
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+    ATTRIBUTES(Stn, buffer2, WorkPtr);
+/*
+    if (Stn->resume != NULLP)
+      {
+      IfNotZero(RptRc,
+        RptList(Lcb, RRes(Stn->resume, buffer)),
+        goto ErrWrite);
+      }
+*/
+    IfNotZero(RptRc, RptListFlush(Lcb), goto ErrWrite);
+
+    RptListTabOn(Lcb);                 /* turn on tab stops           */
+    }
+
+  /*
+  ** Snap STN.
+  */
+
+  if ((Pro->Pso & PsoSnapStn) != 0)
+    {
+    IfNotZero(RptRc,
+      RptSnap(Rcb, "Snap of STN (nvstn)",
+      sizeof(struct nvstn), Stn),
+      goto ErrWrite);
+    }
+
+  /* clear residual page break title */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+
+  /*
+  ** Predecessors
+  */
+
+  if ((Pro->Pco & PcoPred) != 0)
+    {
+    sprintf(buffer, RPrd(Stn));
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 4, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+    for (Index = 0; Index < Stn->npred; Index++)
+      {
+      IfNotZero(RptRc,
+        RptList(Lcb,
+        RSln(Stn->pred->entryíIndexù.stn, buffer, WorkPtr)),
+        goto ErrWrite);
+      }
+
+    IfNotZero(RptRc, RptListFlush(Lcb), goto ErrWrite);
+    }
+
+  /*
+  ** Snap predecessors
+  */
+
+  if (((Pro->Pso & PsoSnapPred) != 0)
+    && (Stn->pred != NULLP))
+    {
+    IfNotZero(RptRc,
+      RptSnap(Rcb, "Snap of predecessors (nvpred)",
+      sizeof(struct nvpred) + sizeof(Stn->pred->entryí0ù)
+      * Stn->pred->count, Stn->pred),
+      goto ErrWrite);
+    }
+
+  /* clear residual page break title */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+
+  /*
+  ** Scroll successors (currently, only 1 scroll successor).
+  */
+
+  if (Stn->scroll != 0)                /* scroll successor exist ?    */
+    {
+    if ((Pro->Pco & PcoScroll) != 0)   /* write scroll data ?         */
+      {
+      /* establish break title */
+      sprintf(buffer, RSrl);
+      IfNotZero(RptRc, RptWrite(Rcb, 2, 4, buffer), goto ErrWrite);
+      strcat(buffer, " (continued)");
+      IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+      IfNotZero(RptRc, RptWrite(Rcb, 1, 2,
+        Raid(Stn->scroll->entryí0ù.said)),
+        goto ErrWrite);
+
+      for (Index = 0; Index < Stn->scroll->count; Index++)
+        {
+        IfNotZero(RptRc,
+          RptList(Lcb,
+          RSln(Stn->scroll->entryíIndexù.stn, buffer, WorkPtr)),
+          goto ErrWrite);
+        } /* for */
+
+      IfNotZero(RptRc, RptListFlush(Lcb), goto ErrWrite);
+      } /* if ((Pro->Pco ... */
+
+    /*
+    ** Snap scroll successor
+    */
+
+    if ((Pro->Pso & PsoSnapScrl) != 0) /* snap scroll successor data ?*/
+      {
+      IfNotZero(RptRc,
+        RptSnap(Rcb, "Snap of scroll successor (nvusucc)",
+        sizeof(struct nvusucc) + sizeof(Stn->scroll->entryí0ù)
+        * Stn->scroll->count, Stn->scroll),
+        goto ErrWrite);
+      }
+
+    /*
+    ** SKS for scroll successors
+    */
+
+    if ( ((Pro->Pmc & PmcSks) != 0)    /* write/snap SKS ?            */
+      || ((Pro->Pms & PmsSnapSks) != 0))
+      {
+      for (Index = 0; Index < Stn->scroll->count; Index++)
+        {
+#define SKIP
+#ifndef SKIP
+/* sksid of 0 is valid */
+        if (Stn->scroll->entryíIndexù.sksid != 0) /* SYSKS exist ?    */
+          {
+#endif
+          Rc = sksload(                  /* load stored keystrokes    */
+            PrjStg,                      /* i/  - storage queue       */
+            Stn->image,                  /* i/  - image               */
+            Stn->var,                    /* i/  - variable list       */
+                                         /*  /o - sks in exec. fmt.   */
+            (struct sksstmt **)(&Stn->scroll->entryíIndexù.sks),
+            Stn->scroll->entryíIndexù.sksid/* i/ - SYSKS rowid        */
+            );
+/* check Rc */
+
+          /*
+          ** Display format.
+          */
+
+          if (((Pro->Pmc & PmcSks) != 0) /* write SKS ?               */
+            && (Stn->scroll->entryíIndexù.sks != NULLP)
+            && (((struct sksstmt *)Stn->scroll->entryíIndexù.sks)->verb
+            != SKSV_END))
+            {
+            /* establish break title */
+            sprintf(buffer,
+              SKSHDRSCRL(Stn->scroll->entryíIndexù.stn,
+              Stn->scroll,
+              buffer2,
+              WorkPtr
+              ));
+            IfNotZero(RptRc,
+              RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+            strcat(buffer, " (contintued)");
+            IfNotZero(RptRc,
+              RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+
+            IfNotZero(RptRc,
+              ReportSks(Rcb,
+              (struct sksstmt *)Stn->scroll->entryíIndexù.sks,
+              Stn->image),
+              goto ErrSks);
+
+            /* clear residual page break title */
+            IfNotZero(RptRc,
+              RptSetTitle(Rcb, 18, 0),
+              goto ErrTitle);
+            } /* if ((Pro->Pmc & PmcSks) != 0) */
+
+          /*
+          ** Snap format.
+          */
+
+          if ((Pro->Pms & PmsSnapSks) != 0) /* snap SKS ?             */
+            {
+            IfNotZero(RptRc,
+              ReportSnapSks(Rcb,
+              (struct sksstmt *)Stn->scroll->entryíIndexù.sks,
+              Stn->scroll->entryíIndexù.stn,
+              SksVsb),
+              goto ErrSks)
+            } /* if ((Pro->Pmc & PmcSks)... */
+#ifndef SKIP
+          } /* if (Stn->scroll->entry... */
+#endif
+        } /* for (Stn->scroll ... */
+      } /* if ((Pro->Pmc & PmcSks) | (Pro->Pms ,.. */
+    } /* if (Stn->scroll != 0) */
+
+  /* clear residual break title */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18,0), goto ErrTitle);
+
+  /*
+  ** Succesors
+  */
+
+  if ((Pro->Pco & PcoSucc) != 0)       /* write successor data ?      */
+    {
+    /* establish break title */
+    sprintf(buffer, RSuc(Stn));
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 4, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+    }
+
+  for (Successor = Stn->succ;
+    Successor != NULLP;
+    Successor = Successor->succ)
+    {
+    if ((Pro->Pco & PcoSucc) != 0)     /* write successor data ?      */
+      {
+      IfNotZero(RptRc,
+        RptWrite(Rcb,
+        (Successor == Stn->succ) ? 1 : 2, 3, Raig(Successor)),
+        goto ErrWrite);
+
+      for (Index = 0; Index < Successor->count; Index++)
+        {
+        IfNotZero(RptRc, RptList(Lcb,
+          RSln(Successor->entryíIndexù.stn, buffer, WorkPtr)),
+          goto ErrWrite);
+        } /* for (Index ... */
+
+      IfNotZero(RptRc, RptListFlush(Lcb), goto ErrWrite);
+      }
+
+    /*
+    ** Snap of successors.
+    */
+
+    if ((Pro->Pso & PsoSnapSucc) != 0) /* snap successor data ?       */
+      {
+      IfNotZero(RptRc,
+        RptSnap(Rcb, "Snap of successors (nvusucc)",
+        sizeof(struct nvusucc) + sizeof(Successor->entryí0ù)
+        * Successor->count, Successor),
+        goto ErrWrite);
+      }
+    } /* for (Successor ... */
+
+  /* clear residual page break title */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+
+  /*
+  ** SKS - stored keystrokes for successors
+  */
+
+  if ( ((Pro->Pmc & PmcSks) != 0)      /* write/snap sks ?            */
+    || ((Pro->Pms & PmsSnapSks) != 0))
+    {
+    for (Successor = Stn->succ;
+      Successor != NULLP;
+      Successor = Successor->succ)
+      {
+      for (Index = 0; Index < Successor->count; Index++)
+        {
+#ifndef SKIP
+/* sksid of 0 is valid */
+        if (Successor->entryíIndexù.sksid != 0) /* SYSKS exist ?      */
+          {
+#endif
+          Rc = sksload(                  /* load stored keystrokes    */
+            PrjStg,                      /* i/  - storage queue       */
+            Stn->image,                  /* i/  - image               */
+            Stn->var,                    /* i/  - variable list       */
+                                         /*  /o - sks in exec. fmt.   */
+            (struct sksstmt **)(&Successor->entryíIndexù.sks),
+            Successor->entryíIndexù.sksid/* i/  - SYSKS rowid         */
+            );
+/* check Rc */
+
+          /*
+          ** Display format.
+          */
+
+          if (((Pro->Pmc & PmcSks) != 0) /* write SKS ?               */
+            && (Successor->entryíIndexù.sks != NULLP)
+            && (((struct sksstmt *)Successor->entryíIndexù.sks)->verb
+            != SKSV_END))
+            {
+
+            /* establish header/break line */
+            sprintf(buffer,
+              SKSHDR(Successor->entryíIndexù.stn,
+              Successor,
+              buffer2,
+              WorkPtr
+              ));
+            IfNotZero(RptRc,
+              RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+            strcat(buffer, " (contintued)");
+            IfNotZero(RptRc,
+              RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+
+            IfNotZero(RptRc,
+              ReportSks(Rcb,
+              (struct sksstmt *)Successor->entryíIndexù.sks,
+              Stn->image),
+              goto ErrSks);
+
+            /* clear residual page break title */
+            IfNotZero(RptRc,
+              RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+
+            } /* if ((Pro->Pmc & PmcSks) != 0) */
+
+          /*
+          ** Snap format.
+          */
+
+          if ((Pro->Pms & PmsSnapSks) != 0) /* snap sks ?             */
+            {
+            IfNotZero(RptRc,
+              ReportSnapSks(Rcb,
+              (struct sksstmt *)Successor->entryíIndexù.sks,
+              Successor->entryíIndexù.stn,
+              SksVsb),
+              goto ErrSks)
+            } /* if ((Pro->Pmc & PmcSks)... */
+#ifndef SKIP
+          } /* if (Successor->entry... */
+#endif
+        } /* for (Index = 0 ... */
+      } /* for (Successor ... */
+    } /* if ((Pro->Pmc & PmcSks) ... */
+
+  /*
+  ** Regions
+  */
+
+  if ((Stn->rt != NULLP)               /* region data exist ...       */
+    && (Stn->rt->Ncount != 0)          /* ... and wanted ?            */
+    && (((Pro->Pco & PcoRegions) != 0)
+        || ((Pro->Pso & PsoSnapRgns) != 0)))
+    {
+
+    /*
+    ** Write regions
+    */
+
+    if ((Pro->Pco & PcoRegions) != 0)  /* yes, write region data ?    */
+      {
+      sprintf(buffer, RRgn(Stn));
+      IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+      strcat(buffer, " (continued)");
+      IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+      RGNHDR;
+      IfNotZero(RptRc, ScrRegion(Rcb, &Stn->rt->root, 0),
+        goto ErrScrgn);
+      RGNTAIL;
+      }
+
+    /*
+    ** Snap regions
+    */
+
+    if ((Pro->Pso & PsoSnapRgns) != 0) /* snap region data ?          */
+      {
+      IfNotZero(RptRc, SnapRegion(Rcb, &Stn->rt->root, 0),
+        goto ErrScrgn);
+      }
+
+    /* clear residual page break title */
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+    } /* if ((Stn->rt != NULLP)... */
+
+  /*
+  ** Variables
+  */
+
+  if ((Stn->var != NULLP)              /* variables exist ...         */
+    && (Stn->var->count != 0)          /* ... and wanted ?            */
+    && (((Pro->Pco & PcoVariables) != 0)
+        || ((Pro->Pso & PsoSnapVars) != 0)))
+    {
+
+    /*
+    ** Write variables
+    */
+
+    if ((Pro->Pco & PcoVariables) != 0)  /* write variable data ?     */
+      {
+      sprintf(buffer, RVar(Stn));
+      IfNotZero(RptRc, RptWrite(Rcb, 2, 4, buffer), goto ErrWrite);
+      strcat(buffer, " (continued)");
+      IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+      VARHDR;
+      for (Index = 0; Index < Stn->var->count; Index++)
+        {
+        VARALL((Stn->var->entryíIndexù.svar), buffer);
+        } /* for */
+      VARTAIL;
+      } /* if ((Pro->Pco & PcoVariables) != 0) */
+
+    /*
+    ** Snap variables
+    */
+
+    if ((Pro->Pso & PsoSnapVars) != 0) /* snap variables              */
+      {
+      IfNotZero(RptRc,
+        RptSnap(Rcb, "Snap of variables (nvvar)",
+        sizeof(struct nvvar) + sizeof(Stn->var->entryí0ù)
+        * Stn->var->count, Stn->var),
+        goto ErrWrite);
+      for (Index = 0; Index < Stn->var->count; Index++)
+        {
+        IfNotZero(RptRc,
+          RptSnap(Rcb, "Snap of variable (svarsect)",
+          sizeof(struct svarsect),
+          Stn->var->entryíIndexù.svar),
+          goto ErrWrite);
+        } /* for */
+      } /* if ((Pro->Pso & ... */
+
+    /* clear residual page break title */
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+    } /* if (Stn->var ... */
+
+  /*
+  ** Variable/Column relationships
+  */
+
+  if ( ((Pro->Pco & PcoRelate) != 0)   /* write/snap var/col data ... */
+    || ((Pro->Pmc & PmcTsx) != 0)      /* or xref table/screen ?      */
+    || ((Pro->Pso & PsoSnapRelate) != 0))
+    {
+    IfNotZero(RptRc,
+      RelateVarCol(Rcb, Pro, Gsc, Xca, Stn),
+      goto ErrVarCol);
+    }
+
+  /*
+  ** Image
+  */
+
+  if ( ((Pro->Pso & PsoSnapImage) != 0)/* write/snap screen image ?   */
+    || ((Pro->Pco & PcoImage) != 0))
+    {
+    IfNotZero(RptRc, ScrImage(Rcb, Pro, Stn), goto ErrImage);
+    } /* if (((Pro->Pso & PsoSnapImage) ... */
+
+  if (Stn->image != NULLP)             /* screen image loaded ?       */
+    {
+    Rc = imgfree(                      /* release screen image        */
+      PrjStg,                          /* i/  - project storage queue */
+      &Stn->image                      /* i/  - address of image addr */
+      );
+/* check return code ? */
+    }
+
+  return(0);                           /* happy return                */
+
+  ErrImage:
+    Rc = imgfree(                      /* release screen image        */
+      PrjStg,                          /* i/  - project storage queue */
+      &Stn->image                      /* i/  - address of image addr */
+      );
+  ErrSks:
+  ErrWrite:
+  ErrTitle:
+  ErrScrgn:
+  ErrVarCol:
+    return(RptRc);                     /* unhappy return              */
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Report on an STN's region(s)                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write input regions's data.                                        */
+/* Recurse to write subregion's data                                  */
+/* Recurse to write peer region's data                                */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc ScrRegion(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  struct rgntry *  Rnt,                /* i/  - region entry          */
+  int              Level               /* i/  - recursion level       */
+  )
+
+{
+
+  tRptRc           RptRc;              /* report return code          */
+  char             bufferí17ù;         /* work buffer                 */
+
+  if (Rnt == NULLP)                    /* done ?                      */
+    {
+    return(0);                         /* yes, exit                   */
+    }
+
+  if (Level != 0)                      /* on top ?                    */
+    {
+    RGNALL(Rnt->rgn, buffer, Level);
+    }
+
+  /* recurse subregions */
+  IfNotZero(RptRc, ScrRegion(Rcb, Rnt->subrgn, Level + 1),
+    return(RptRc));
+
+  /* recurse peers */
+  IfNotZero(RptRc, ScrRegion(Rcb, Rnt->peer, Level),
+    return(RptRc));
+
+  return(0);
+
+  ErrWrite:
+    return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Snap STN's region(s)                                               */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Snap input regions's data.                                         */
+/* Recurse to snap subregion's data                                   */
+/* Recurse to snap peer region's data                                 */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc SnapRegion(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  struct rgntry *  Rnt,                /* i/  - region entry          */
+  int              Level               /* i/  - recursion level       */
+  )
+
+{
+
+  tRptRc           RptRc;              /* report return code          */
+
+  if (Rnt == NULLP)                    /* done ?                      */
+    {
+    return(0);                         /* yes, exit                   */
+    }
+
+  if (Level != 0)                      /* on top ? yes, it's dull.    */
+    {
+    IfNotZero(RptRc,
+      RptSnap(Rcb, "Snap of region (sysrgn)",
+      sizeof(struct sysrgn), Rnt->rgn),
+      goto ErrWrite);
+    }
+
+  /* recurse subregions */
+  IfNotZero(RptRc, SnapRegion(Rcb, Rnt->subrgn, Level + 1),
+    return(RptRc));
+
+  /* recurse peers */
+  IfNotZero(RptRc, SnapRegion(Rcb, Rnt->peer, Level),
+    return(RptRc));
+
+  return(0);
+
+  ErrWrite:
+    return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+
+tGscRc GetSyscolumns(                  /* retrieve & sort syscolumns  */
+  tGsc *           Gsc,                /* i/  - get syscolumns c.b.   */
+  int              (*CompareRoutine)(const void *, const void *)
+  )
+
+{
+
+  struct syscols *  Syscol;            /* returned syscolumn data addr*/
+  tTbsRc            TbsRc;             /* table service return code   */
+  tBlkRc            BlkRc;             /* fixed stg. array rc         */
+  tVsaRc            VsbRc;             /* variable stg. array rc      */
+  int               Offset;            /* variable offset             */
+  int               Count;             /* work counter                */
+
+  /*
+  ** Refresh storage managers to hold new syscolumn occurrences.
+  */
+
+  BlkClear(Gsc->Bcb);
+  VsaClear(Gsc->Vsb);
+
+  TbsRc = TbsSet(Gsc->Tbs, TssTop, NULLP); /* position to table start */
+
+  /*
+  ** Retrieve all selected (pre-set Sarg) syscolumn occurrences and
+  ** copy into storage managers.
+  */
+
+  for (Gsc->Count = 0; 1; Gsc->Count++)
+    {
+
+    TbsRc = TbsGet(Gsc->Tbs, TpsNext, TgcSarg, NULLP, NULLP,
+      (void **)&Syscol);
+
+    if (TbsRc == TbsEndOfTable)
+      {
+      break;
+      }
+
+    if (TbsRc != TbsOk)
+      {
+      goto ErrTbsGet;
+      }
+
+    if (Syscol->scoldflt.len != 0)     /* variable length data exist? */
+      {
+      Offset = VsaTell(Gsc->Vsb);      /* get target offset           */
+
+      IfNotZero(VsbRc,                 /* retain variable length part */
+        VsaAdd(Gsc->Vsb,
+        Syscol->scoldflt.origin,
+        Syscol->scoldflt.len),
+        goto ErrVsaAdd);
+
+      Syscol->scoldflt.offset = Offset;
+
+      }
+
+    IfNotZero(BlkRc,
+      BlkAdd(Gsc->Bcb, Syscol),        /* retain fixed length part    */
+      goto ErrBlkAdd);
+
+    } /* for (Gsc->Count ... */
+
+  /*
+  ** Sort syscolumn (fixed length part) occurrences.
+  */
+
+  if (Gsc->Count > 0)
+    {
+
+    BlkSeek(Gsc->Bcb, 0, BorSet);
+    BlkClear(Gsc->SortedBcb);
+
+    for (Count = 0; Count < Gsc->Count; Count++)
+      {
+      /* reuse syscol variable to point into syscol occurrence Bcb */
+      Syscol = BlkSeekPtr(Gsc->Bcb, Count, BorSet);
+
+      /* add syscolumn pointer (for sorting) */
+      IfNotZero(BlkRc,
+        BlkAdd(Gsc->SortedBcb, &Syscol),
+        goto ErrBlkAdd);
+      }
+
+    BlkSort(Gsc->SortedBcb, CompareRoutine); /* sort pointers         */
+
+    }
+
+  return(GscOk);
+
+ErrTbsGet:
+ErrBlkAdd:
+ErrVsaAdd:
+  return(GscError);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* RelateVarCol - Report on relationships between an STN's variables  */
+/* and the relational table definitions for the project.  Add entry   */
+/* to table name / screen name xref.                                  */
+/*--------------------------------------------------------------------*/
+
+tRptRc RelateVarCol(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tPro *           Pro,                /* i/  - project report options*/
+  tGsc *           Gsc,                /* i/  - get-syscolumn control */
+  tXca *           Xca,                /* i/  - xref control area     */
+  struct nvstn *   Stn                 /* i/  - state transition node */
+  )
+
+{
+
+  int              ColumnSelector;     /* search column index         */
+  struct syscols * Syscolumn;          /* selected syscol             */
+  char *           Value;              /* screen/set name pointer     */
+  int              Count;              /* syscolumn work counter      */
+  char *           VarOrigin;          /* variable data base address  */
+  char             Screení17ù;         /* screen name string buffer   */
+  char             bufferí100ù;        /* break title work buffer     */
+  tGscRc           GscRc;              /* get-syscolumn return code   */
+  tTxe             Txe;                /* table/screen xref entry     */
+
+  tRptRc           RptRc = 0;          /* return code                 */
+
+  /* syscol compare routines for sorting */
+  int (*CompareSyscolí4ù)(const void *, const void *) =
+    {
+    CmpSyscolSel,
+    CmpSyscolIns,
+    CmpSyscolUpd,
+    CmpSyscolDel
+    };
+
+  /* header strings for report writing */
+  static const char *HdrStringí4ù =    /* report line header strings  */
+    {
+    "Select",
+    "Insert",
+    "Update",
+    "Delete"
+    };
+
+  /* syscol column names for table search arguments */
+  static const tColumnNameZ SearchColumní4ù =
+    {
+/*  "----+----1----+-" */
+    "SCOLVSCR        ",
+    "SCOLVICR        ",
+    "SCOLVUCR        ",
+    "SCOLVDCR        "
+    };
+
+typedef struct syscols tSyscols;
+
+  static const int  SkeyvarOffsetí4ù =
+    {
+    offsetof(tSyscols, scolvsel),
+    offsetof(tSyscols, scolvins),
+    offsetof(tSyscols, scolvupd),
+    offsetof(tSyscols, scolvdel)
+    };
+
+  static const int  ScoluseOffsetí4ù =
+    {
+    offsetof(tSyscols, scolsuse),
+    offsetof(tSyscols, scoliuse),
+    offsetof(tSyscols, scoluuse),
+    offsetof(tSyscols, scolduse)
+    };
+
+  /*
+  ** Extract SYSCOLUMN search-argument value (screen/screen set name)
+  */
+
+  Value = memstr(Screen, Stn->ssn, ' ', 16); /* assume screen set     */
+
+  if (*Value == '\0')                  /* screen set ?                */
+    {
+    memcpy(Screen, Stn->name, sizeof(Stn->name));
+    Txe.Flag = SfgNull;                /* xref information            */
+    }
+  else
+    {
+    memcpy(Screen, Stn->ssn, sizeof(Stn->ssn));
+    Txe.Flag = SfgScreenSet;           /* xref information            */
+    }
+
+  /* initialize xref entry */
+  if ((Pro->Pmc & PmcTsx) != 0)
+    {
+    memcpy(Txe.Screen, Screen, sizeof(Stn->name));
+    Txe.Page = Xca->StnPage;
+    }
+
+  /*
+  ** Report on syscolumn occurrences for selects, inserts, updates, and
+  ** deletes that reference this screen/screen set.
+  */
+
+  for (ColumnSelector = 0; ColumnSelector < 4; ColumnSelector++)
+    {
+
+    /*
+    ** Build syscolumn-table search arg. to retrieve occurrences by
+    ** screen/screen set name.
+    ** I.e.
+    ** SELECT * FROM SYSCOLUMN WHERE "SEL VAR NAME" = <SCREEN/SET>
+    ** SELECT * FROM SYSCOLUMN WHERE "INS VAR NAME" = <SCREEN/SET>
+    ** SELECT * FROM SYSCOLUMN WHERE "UPD VAR NAME" = <SCREEN/SET>
+    ** SELECT * FROM SYSCOLUMN WHERE "DEL VAR NAME" = <SCREEN/SET>
+    */
+
+    TbsSargInit(Gsc->Tbs, TscAnd);     /* init/clear search argument  */
+
+    TbsSargAdd(                        /* build column search arg.    */
+      Gsc->Tbs,
+      (tColumnName *)SearchColumníColumnSelectorù,
+      TsrEQ,
+      Screen,
+      sizeof(Stn->name)
+      );
+
+    /*
+    ** Retrieve and report on set of syscolumn occurrences.
+    */
+
+    IfNotZero(GscRc,
+      GetSyscolumns(Gsc, CompareSyscolíColumnSelectorù),
+      goto ErrColGet);
+
+    if (VsaSeek(Gsc->Vsb, 0, VorSet) < 0)
+      {
+      goto ErrVsaSeek;
+      }
+
+    VarOrigin = VsaTellPtr(Gsc->Vsb);  /* get variable target address */
+
+    if (Gsc->Count > 0)                /* any occurrences ?           */
+      {
+
+      /*
+      ** Write Variable/Column relationship - display format
+      */
+
+      if ( ((Pro->Pco & PcoRelate) != 0)/* write var/col data ...     */
+        || ((Pro->Pmc & PmcTsx) != 0)) /* or table/screen xref ?      */
+        {
+
+        if ((Pro->Pco & PcoRelate) != 0)
+          {
+
+          /*
+          ** Write/establish break titles.
+          */
+
+          sprintf(buffer,
+            VARCOLDTLH(HdrStringíColumnSelectorù, Gsc->Count));
+          IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+          strcat(buffer, " (continued)");
+          IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+          VARCOLHDR;
+          } /* if ((Pro->Pco & PcoRelate) != 0) */
+
+        for(Count = 0; Count < Gsc->Count; Count++)
+          {
+
+          /* address each sorted occurrence */
+          BlkGet(Gsc->SortedBcb, &Syscolumn);
+
+          /* add table name / screen name xref entry */
+          if ((Pro->Pmc & PmcTsx) != 0)
+            {
+            memcpy(Txe.Table, Syscolumn->scoltbnm, sizeof(Txe.Table));
+            BlkAdd(Xca->TsxBcb, &Txe);
+            }
+
+          /* write detail entry */
+          if ((Pro->Pco & PcoRelate) != 0)
+            {
+            VARCOLALL(
+              Syscolumn,
+              ((struct skeyvar *)
+                ((char *)Syscolumn + SkeyvarOffsetíColumnSelectorù)),
+              VarOrigin,
+              (*((char *)Syscolumn + ScoluseOffsetíColumnSelectorù))
+              );
+            }
+          } /* for(Count ... */
+
+        if ((Pro->Pco & PcoRelate) != 0)
+          {
+          VARCOLTAIL;
+          }
+
+        /* clear residual page break titles */
+        IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+        IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle);
+
+        } /* if ((Pro->Pco ... */
+
+      /*
+      ** Write snap format - snap of syscolumns
+      */
+
+      if ((Pro->Pso & PsoSnapRelate) != 0) /* snap var/col data ?     */
+        {
+
+        for(Count = 0; Count < Gsc->Count; Count++)
+          {
+          BlkGet(Gsc->SortedBcb, &Syscolumn);
+          IfNotZero(RptRc,
+            RptSnap(Rcb, "Snap of syscolumn", sizeof(struct syscols),
+            Syscolumn), goto ErrWrite);
+          } /* for */
+        } /* if ((Pro->Pso & PsoSnapRelate) ... */
+      } /* if (Gsc->Count > 0) */
+    } /* for (ColumnSelector = 0 ... */
+
+/*
+** Exit.
+*/
+
+  /* clear residual page break titles */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle);
+
+  return(RptRc);
+
+ErrVsaSeek:
+  /* issue error message */
+ErrColGet:
+  /* issue error message */
+ErrBlkInit:
+  /* issue error message */
+ErrBlkAdd:
+  /* issue error message */
+ErrBlkTerm:
+  /* issue error message */
+  RptRc = RptErrorOther;
+ErrTitle:
+ErrWrite:
+  /* clear residual page break titles */
+  RptSetTitle(Rcb, 18, 0);
+  RptSetTitle(Rcb, 21, 0);
+
+  return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write screen image - display and snap format                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/* For display format:                                                */
+/* - create modifiable copy of screen image                           */
+/* - blank out data in "invisible" fields                             */
+/* - convert attribute bytes to '      ' characters                   */
+/* - write display format screen image row by row                     */
+/*                                                                    */
+/* For snap format:                                                   */
+/* - create modifiable copy of screen image                           */
+/* - blank out data in "invisible" fields                             */
+/* - snap modified screen-image storage                               */
+/*--------------------------------------------------------------------*/
+
+tRptRc ScrImage(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tPro *           Pro,                /* i/  - project report options*/
+  struct nvstn *   Stn                 /* i/  - state transition node */
+  )
+
+{
+
+  tRptRc           RptRc;              /* return code                 */
+  int              Index;              /* work index                  */
+  char             C;                  /* leading/trailing row char.  */
+  char *           BufPtr;             /* work buffer pointer         */
+  char             bufferí132*27ù;     /* largest screen expected     */
+
+  static const char itocí11ù = "01234567879";
+  static const char Markeríù =         /* column marker line          */
+    "0----+----"
+    "1----+----"
+    "2----+----"
+    "3----+----"
+    "4----+----"
+    "5----+----"
+    "6----+----"
+    "7----+----"
+    "8----+----"
+    "9----+----"
+    "0----+----"
+    "1----+----"
+    "2----+----"
+    "3--";
+
+  /*
+  ** Write display format.
+  */
+
+  if (((Pro->Pco & PcoImage) != 0)     /* image wanted ...            */
+    && (Stn->image != NULLP)           /* ... and it exists ?         */
+    && (Stn->image->attached != 0))
+    {
+
+    /*
+    ** Write/establish break titles.
+    */
+
+    sprintf(buffer, "    Screen image: %d x %d",
+      Stn->image->rows, Stn->image->cols);
+    IfNotZero(RptRc, RptWrite(Rcb, 2, Stn->image->rows + 4, buffer),
+      goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18,buffer), goto ErrTitle);
+
+    sprintf(buffer, "       %.*s", Stn->image->cols+1, Marker);
+    IfNotZero(RptRc, RptWrite(Rcb, 1, 1, buffer), goto ErrWrite);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 21, buffer), goto ErrTitle);
+
+    /*
+    ** Blank-out invisible fields.
+    */
+
+    memcpy(buffer, Stn->image->buffer, Stn->image->buflen);
+    imgdark(buffer, Stn->image->buflen);
+
+    /*
+    ** Translate image to printable format and write it row by row.
+    */
+
+    TransSelText(buffer, Stn->image->buflen);
+
+    for (Index = 0, BufPtr = buffer;
+      Index < Stn->image->rows;
+      Index++, BufPtr += Stn->image->cols)
+      {
+      /* line includes leading and trailing row indicator */
+      IfNotZero(RptRc,
+        RptWrite(Rcb, 1, 1, "       %c%*.*s%c",
+        C = ((((Index + 1) % 10) == 0) ?
+        itocí((Index + 1) / 10)ù :
+        ((((Index + 1) % 5) == 0) ? '+' : ':')),
+        Stn->image->cols, Stn->image->cols, BufPtr, C),
+        goto ErrWrite);
+      } /* for ... */
+
+    /* write column marker */
+    IfNotZero(RptRc,
+      RptWrite(Rcb, 1, 1, "       %.*s", Stn->image->cols+1, Marker),
+      goto ErrWrite);
+
+    /* clear residual break titles */
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle);
+    } /* if (((Pro->Pco & PcoImage) != 0) ... */
+
+  /*
+  ** Write snap format.
+  */
+
+  if (((Pro->Pso & PsoSnapImage) != 0) /* snap screen image ...       */
+    && (Stn->image != NULLP))          /* ... and its loaded ?        */
+    {
+    IfNotZero(RptRc,
+      RptSnap(Rcb, "Snap of image (image)",
+      sizeof(struct image),
+      Stn->image),
+      goto ErrWrite);
+
+    if (Stn->image->attached != 0)
+      {
+
+      /*
+      ** Blank-out invisible fields.
+      */
+
+      memcpy(buffer, Stn->image->buffer, Stn->image->buflen);
+      imgdark(buffer, Stn->image->buflen);
+
+      IfNotZero(RptRc,
+        RptSnap(Rcb, "Snap of image buffer",
+        Stn->image->buflen,
+        buffer),
+        goto ErrWrite);
+      }
+    }
+
+  return(0);
+
+  ErrTitle:
+  ErrWrite:
+    RptSetTitle(Rcb, 18, 0);
+    RptSetTitle(Rcb, 21, 0);
+    return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Report stored keystrokes                                           */
+/*--------------------------------------------------------------------*/
+
+tRptRc ReportSks(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  struct sksstmt * SksOrigin,          /* i/  - start of sksstmt      */
+  struct image *   Image               /* i/  - image                 */
+  )
+
+{
+
+  struct sksstmt * Sks;                /* current sks statment        */
+  char             bufferí2*17ù;       /* buffer work area            */
+  tRptRc           RptRc = 0;          /* report return code          */
+
+  for (Sks = SksOrigin;
+    Sks->verb != SKSV_END; )
+    {
+    switch(Sks->verb)                  /* verb dependent operations   */
+      {
+      case SKSV_BLK:
+        SKSBLK(((struct sks_blk *)Sks), buffer);
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_blk));
+        break;
+
+      case SKSV_CSR:
+        SKSCSR(((struct sks_csr *)Sks), Image);
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_csr));
+        break;
+
+      case SKSV_EOF: /* verb only */
+        SKSEOF((Sks));
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(Sks->verb));
+        break;
+
+      case SKSV_TEXT:
+        SKSTEXT(((struct sks_text *)Sks));
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_text) +
+          ((struct sks_text *)Sks)->textlen);
+        break;
+
+      case SKSV_RGN:
+        SKSRGN(((struct sks_rgn *)Sks));
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_rgn));
+        break;
+
+      case SKSV_LOC:
+        SKSLOC(((struct sks_loc *)Sks), buffer);
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_loc));
+        break;
+
+      case SKSV_VAR:
+        SKSVAR(((struct sks_var *)Sks), buffer);
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_var));
+        break;
+
+      case SKSV_XIT: /* verb only */
+        SKSXIT(((struct sks_blk *)Sks));
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(Sks->verb));
+        break;
+
+      default:
+        SKSUKNOWN(Sks);
+/* error - unknown sks node */
+        goto ErrWrite; /* exit for */
+        break;
+
+      } /* switch(Sks->verb) */
+    } /* for (Sks = SksOrigin; */
+
+  return(RptRc);
+
+ErrWrite:
+  return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Snap stored keystorkes                                             */
+/*--------------------------------------------------------------------*/
+
+tRptRc ReportSnapSks(                  /* snap SKS                    */
+  tRcb *           Rcb,                /* i/  - report control block  */
+  struct sksstmt * SksOrigin,          /* i/  - start of SKS          */
+  struct nvstn *   Stn,                /* i/  - stn                   */
+  tVsb *           SksVsb              /* i/  - var. length stg. mgr. */
+  )
+
+{
+
+  struct sksstmt * Sks;                /* current sks statment        */
+  tRptRc           RptRc;              /* report return code          */
+  char             bufferí17*2ù;       /* work buffer                 */
+  char *           WorkPtr;            /* work pointer                */
+  char             Titleí80ù;          /* snap title work area        */
+  tVsaRc           VsaRc;              /* var stg mgr return code     */
+  void *           Entry;              /* entry to insert into stg mgr*/
+  int              Length;             /* entry length                */
+
+/*
+** Initialize variable length storage manager to create a modifiable
+** SKS.  Invisible text fields are altered to maintain security.
+*/
+
+  VsaClear(SksVsb);
+
+  /* Modify invisible text fields */
+  for (Sks = SksOrigin;
+    Sks->verb != SKSV_END; )
+    {
+
+    Entry = Sks;                       /* entry to insert into stg mgr*/
+
+    switch(Sks->verb)                  /* verb dependent operation    */
+      {
+      case SKSV_BLK:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_blk));
+        Length = sizeof(struct sks_blk);
+        break;
+
+      case SKSV_CSR:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_csr));
+        Length = sizeof(struct sks_csr);
+        break;
+
+      case SKSV_EOF: /* verb only */
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(Sks->verb));
+        Length = sizeof(Sks->verb);
+        break;
+
+      case SKSV_TEXT:                  /* mask invisible text         */
+
+        IfNotZero(VsaRc,
+          VsaAdd(SksVsb,
+          Entry,
+          sizeof(struct sks_text) + ((struct sks_text *)Sks)->textlen),
+          goto ErrVsaAdd);
+
+        if ((((struct sks_text *)Sks)->flags & TEX_FINV) != 0)
+          {
+          /* get address of entry just added */
+          if ((Entry = VsaSeekPtr(SksVsb, -1, VorCur)) == NULLP)
+            {
+            goto ErrVsaSeek;
+            }
+          memset( ((struct sks_text *)Entry)->text, '*',
+            ((struct sks_text *)Entry)->textlen);
+          }
+
+        Length = 0;                    /* inhibit additional insert   */
+
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_text) +
+          ((struct sks_text *)Sks)->textlen);
+        break;
+
+      case SKSV_RGN:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_rgn));
+        Length = sizeof(struct sks_rgn);
+        break;
+
+      case SKSV_LOC:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_loc));
+        Length = sizeof(struct sks_loc);
+        break;
+
+      case SKSV_VAR:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(struct sks_var));
+        Length = sizeof(struct sks_var);
+        break;
+
+      case SKSV_XIT: /* verb only */
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(Sks->verb));
+        Length = sizeof(Sks->verb);
+        break;
+
+      default:
+        Sks = (struct sksstmt *)
+          ((char *)Sks + sizeof(Sks->verb)); /* assume verb only */
+        Length = sizeof(Sks->verb);
+        break;
+
+      } /* switch(Sks->verb) */
+
+      IfNotZero(VsaRc,
+        VsaAdd(SksVsb,
+        Entry,
+        Length),
+        goto ErrVsaAdd);
+
+    } /* for (Sks = SksOrigin; */
+
+  IfNotZero(VsaRc,                     /* add SKSV_END to stg mgr     */
+    VsaAdd(SksVsb,
+    Sks,
+    sizeof(Sks->verb)),
+    goto ErrVsaAdd);
+
+  if ((Entry = VsaSeekPtr(SksVsb, 0, VorSet)) == NULLP)
+    {
+    goto ErrVsaSeek;
+    }
+
+  /* snap sks */
+
+  sprintf(Title,
+    "Snap of SKS for successor %s%.16s",
+    ScrSetName(Stn, buffer, WorkPtr));
+
+  IfNotZero(RptRc,
+    RptSnap(Rcb, Title,
+    (char *)Sks + sizeof(Sks->verb) - (char *)SksOrigin, Entry),
+    goto ErrWrite);
+
+  return(RptRc);
+
+ErrVsaAdd:
+ErrVsaSeek:
+ErrWrite:
+
+  return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* compare STNs to sort into ascending screen name order              */
+/*--------------------------------------------------------------------*/
+
+int CompareStn(
+  const void * Entry1,
+  const void * Entry2
+  )
+
+{
+
+  char * Ptr1;
+  char * Ptr2;
+
+#define Stn1 (*(struct nvstn **)Entry1)
+#define Stn2 (*(struct nvstn **)Entry2)
+
+  Ptr1 = Stn1->name;
+  Ptr2 = Stn2->name;
+
+  if (*Stn1->ssn != '\0') Ptr1 = Stn1->ssn;
+  if (*Stn2->ssn != '\0') Ptr2 = Stn2->ssn;
+
+  return(memcmp(
+    Ptr1,
+    Ptr2,
+    sizeof(Stn1->name)
+    ));
+
+#undef Stn1
+#undef Stn2
+
+}
+
+/*--------------------------------------------------------------------*/
+/* compare syscols to sort into variable name, table name order       */
+/*--------------------------------------------------------------------*/
+
+int CmpSyscolSel(
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+  int              Rc;
+
+#define Syscols1 (*(struct syscols **)Entry1)
+#define Syscols2 (*(struct syscols **)Entry2)
+
+  /* variable name */
+  if ((Rc = memcmp(Syscols1->scolvsel.skvarnam,
+    Syscols2->scolvsel.skvarnam,
+    sizeof(Syscols2->scolvsel.skvarnam))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* table name */
+  return(memcmp(Syscols1->scoltbnm,
+    Syscols2->scoltbnm,
+    sizeof(Syscols2->scoltbnm)));
+
+}
+
+int CmpSyscolIns(
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+  int              Rc;
+
+  /* variable name */
+  if ((Rc = memcmp(Syscols1->scolvins.skvarnam,
+    Syscols2->scolvins.skvarnam,
+    sizeof(Syscols2->scolvins.skvarnam))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* table name */
+  return(memcmp(Syscols1->scoltbnm,
+    Syscols2->scoltbnm,
+    sizeof(Syscols2->scoltbnm)));
+
+}
+
+int CmpSyscolUpd(
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+  int              Rc;
+
+  /* variable name */
+  if ((Rc = memcmp(Syscols1->scolvupd.skvarnam,
+    Syscols2->scolvupd.skvarnam,
+    sizeof(Syscols2->scolvupd.skvarnam))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* table name */
+  return(memcmp(Syscols1->scoltbnm,
+    Syscols2->scoltbnm,
+    sizeof(Syscols2->scoltbnm)));
+
+}
+
+int CmpSyscolDel(
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+  int              Rc;
+
+  /* variable name */
+  if ((Rc = memcmp(Syscols1->scolvdel.skvarnam,
+    Syscols2->scolvdel.skvarnam,
+    sizeof(Syscols2->scolvdel.skvarnam))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* table name */
+  return(memcmp(Syscols1->scoltbnm,
+    Syscols2->scoltbnm,
+    sizeof(Syscols2->scoltbnm)));
+
+}
+
+#undef Syscols1
+#undef Syscols2
+
+/*--------------------------------------------------------------------*/
+/* convert fixed length character array to string                     */
+/*--------------------------------------------------------------------*/
+
+char * memstr(                         /* convert memory to string    */
+  char *           Target,             /*  /o - target string buffer  */
+  char *           Source,             /* i/  - memory source         */
+  int              StopChar,           /* i/  - end-of-string char    */
+  int              MaxSourceLength     /* i/  - maximum source length */
+  )
+
+{
+
+  char *           TargetChar;
+
+  for (TargetChar = Target;
+    (MaxSourceLength-- > 0)
+    && ((*TargetChar = *Source) != StopChar);
+    TargetChar++, Source++)
+    {
+    ;
+    }
+
+  *TargetChar = '\0';
+
+  return(Target);
+
+} /* memstr */
+
+/*--------------------------------------------------------------------*/
+/* convert AID to string                                              */
+/*--------------------------------------------------------------------*/
+
+static const char * aidtos(            /* convert aid to string       */
+  char             Aid                 /* i/  - aid                   */
+  )
+
+{
+
+  int              Index;
+
+  static const tAtosTbl AtosTbl =
+    mInitAtosTbl;
+
+  for(Index=0;
+    (Index < ValidAids) && (Aid != AtosTblíIndexù.Aid);
+    Index++)
+    {
+    ; /* locate matching AID entry */
+    }
+
+  return(AtosTblíIndexù.String);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* convert region locator method to string                            */
+/*--------------------------------------------------------------------*/
+
+static const char * methstr(           /* method type to string       */
+  char             Type                /* i/  - method type           */
+  )
+
+{
+
+  int              Index;
+
+  static const tMethTbl MethTbl =
+    mInitMethTbl;
+
+  for (Index = 0;
+    (Index < ValidMeths) && (Type != MethTblíIndexù.Type);
+    Index++)
+    {
+    ; /* locate matching type entry */
+    }
+
+  return(MethTblíIndexù.String);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* convert variable locator method to string                          */
+/*--------------------------------------------------------------------*/
+
+static const char * vmthstr(           /* variable method to string   */
+  char             Type                /* i/  - method type           */
+  )
+
+{
+
+  int              Index;
+
+  static const tVmthTbl VmthTbl =
+    mInitVmthTbl;
+
+  for (Index = 0;
+    (Index < ValidVmths) && (Type != VmthTblíIndexù.Type);
+    Index++)
+    {
+    ; /* locate matching type entry */
+    }
+
+  return(VmthTblíIndexù.String);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* convert variable usage to string                                   */
+/*--------------------------------------------------------------------*/
+
+static const char * vusestr(           /* variable method to string   */
+  char             Type                /* i/  - method type           */
+  )
+
+{
+
+  int              Index;
+
+  static const tVuseTbl VuseTbl =
+    mInitVuseTbl;
+
+  for (Index = 0;
+    (Index < ValidVuses) && (Type != VuseTblíIndexù.Type);
+    Index++)
+    {
+    ; /* locate matching type entry */
+    }
+
+  return(VuseTblíIndexù.String);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* convert variable default value indicator to string                 */
+/*--------------------------------------------------------------------*/
+
+static const char * defstr(            /* variable default to string  */
+  char             Type                /* i/  - default               */
+  )
+
+{
+
+  if ((Type & svaru_none) != 0)
+    {
+    return("-None");
+    }
+
+  if ((Type & svaru_blnk) != 0)
+    {
+    return(" Blank");
+    }
+
+  if ((Type & svaru_null) != 0)
+    {
+    return("Null");
+    }
+
+  return("Specified");
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Set Project report options - flip on selected bits in the PRO c.b. */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* The following list presents the available project report options:  */
+/* REC      - write recordings in which STN participates              */
+/* ATR      - write STN's attribute data                              */
+/* SUCC     - write STN's successor data                              */
+/* PRED     - write STN's predecessor data                            */
+/* SCRL     - write STN's scroll successor data                       */
+/* VARS     - write STN's variable data                               */
+/* RGNS     - write STN's region data                                 */
+/* IMG      - write STN's screen image                                */
+/* REL      - write STN's variable/column relationships (syscolumn)   */
+/* SKS      - write STN's stored keystrokes for each successor        */
+/* SNAPSTN  - snap STN                                                */
+/* SNAPSUCC - snap STN's successor data                               */
+/* SNAPPRED - snap STN's predecessor data                             */
+/* SNAPSCRL - snap STN's scroll successor data                        */
+/* SNAPVARS - snap STN's variable data                                */
+/* SNAPRGNS - snap STN's region data                                  */
+/* SNAPIMG  - snap STN's screen image                                 */
+/* SNAPREL  - snap STN's variable/column relationships (syscolumn)    */
+/* SNAPSKS  - snap STN's stored keystrokes for each successor         */
+/* MSGS     - write messages from navigation build process            */
+/* LGNDS    - write legend text that describes region & variable data */
+/* RSX      - write recording/screen xref                             */
+/* TSX      - write table/screen xref                                 */
+/* PSL      - write screen list xref                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+typedef char tPrk;                     /* project report keyword ids  */
+#define PrkAtr         1
+#define PrkSucc        2
+#define PrkPred        3
+#define PrkScroll      4
+#define PrkVariables   5
+#define PrkRegions     6
+#define PrkImage       7
+#define PrkRelate      8
+#define PrkSks         9
+#define PrkMsgs       10
+#define PrkLegends    11
+#define PrkSnapStn    12
+#define PrkSnapSucc   13
+#define PrkSnapPred   14
+#define PrkSnapScrl   15
+#define PrkSnapVars   16
+#define PrkSnapRgns   17
+#define PrkSnapImage  18
+#define PrkSnapRelate 19
+#define PrkSnapSks    20
+#define PrkRsx        21
+#define PrkTsx        22
+#define PrkPsl        23
+#define PrkSnapTbl    24
+#define PrkRec        25
+#define PrkKeywordCount 25
+
+int SetProjectReportOptions(
+  char *           ProString,          /* i/  - keyword command string*/
+  tPro *           Pro,                /*  /o - posted values block   */
+  char *           Msg                 /*  /o - error message area    */
+  )
+
+{
+
+  int              Rc = 0;             /* return code                 */
+
+/*
+** Project Report keyword table.
+*/
+
+  static const struct keytab ProKeyTableíù =
+    {
+    KEYE("REC",      0, 0, PrkRec       , NOTYPE),
+    KEYE("ATR",      0, 0, PrkAtr       , NOTYPE),
+    KEYE("SUCC",     0, 0, PrkSucc      , NOTYPE),
+    KEYE("PRED",     0, 0, PrkPred      , NOTYPE),
+    KEYE("SCRL",     0, 0, PrkScroll    , NOTYPE),
+    KEYE("VARS",     0, 0, PrkVariables , NOTYPE),
+    KEYE("RGNS",     0, 0, PrkRegions   , NOTYPE),
+    KEYE("IMG",      0, 0, PrkImage     , NOTYPE),
+    KEYE("REL",      0, 0, PrkRelate    , NOTYPE),
+    KEYE("SKS",      0, 0, PrkSks       , NOTYPE),
+    KEYE("RSX",      0, 0, PrkRsx       , NOTYPE),
+    KEYE("TSX",      0, 0, PrkTsx       , NOTYPE),
+    KEYE("PSL",      0, 0, PrkPsl       , NOTYPE),
+    KEYE("MSGS",     0, 0, PrkMsgs      , NOTYPE),
+    KEYE("LGNDS",    0, 0, PrkLegends   , NOTYPE),
+    KEYE("SNAPSTN",  0, 0, PrkSnapStn   , NOTYPE),
+    KEYE("SNAPSUCC", 0, 0, PrkSnapSucc  , NOTYPE),
+    KEYE("SNAPPRED", 0, 0, PrkSnapPred  , NOTYPE),
+    KEYE("SNAPSCRL", 0, 0, PrkSnapScrl  , NOTYPE),
+    KEYE("SNAPVARS", 0, 0, PrkSnapVars  , NOTYPE),
+    KEYE("SNAPRGNS", 0, 0, PrkSnapRgns  , NOTYPE),
+    KEYE("SNAPIMG",  0, 0, PrkSnapImage , NOTYPE),
+    KEYE("SNAPREL",  0, 0, PrkSnapRelate, NOTYPE),
+    KEYE("SNAPSKS",  0, 0, PrkSnapSks   , NOTYPE),
+    KEYE("SNAPTBL",  0, 0, PrkSnapTbl   , NOTYPE),
+    KEYENULL
+    };
+
+/*
+** Project Report operand value-posting control table.
+*/
+
+  static const struct postops ProOpsTableíù =
+    {
+    {PrkRec      , offsetof(tPro, Pmc), 1, 0, PmcRec       , SET, 0, 0},
+    {PrkAtr      , offsetof(tPro, Pco), 1, 0, PcoAtr       , SET, 0, 0},
+    {PrkSucc     , offsetof(tPro, Pco), 1, 0, PcoSucc      , SET, 0, 0},
+    {PrkPred     , offsetof(tPro, Pco), 1, 0, PcoPred      , SET, 0, 0},
+    {PrkScroll   , offsetof(tPro, Pco), 1, 0, PcoScroll    , SET, 0, 0},
+    {PrkVariables, offsetof(tPro, Pco), 1, 0, PcoVariables , SET, 0, 0},
+    {PrkRegions  , offsetof(tPro, Pco), 1, 0, PcoRegions   , SET, 0, 0},
+    {PrkImage    , offsetof(tPro, Pco), 1, 0, PcoImage     , SET, 0, 0},
+    {PrkRelate   , offsetof(tPro, Pco), 1, 0, PcoRelate    , SET, 0, 0},
+    {PrkMsgs     , offsetof(tPro, Pmc), 1, 0, PmcMsgs      , SET, 0, 0},
+    {PrkRsx      , offsetof(tPro, Pmc), 1, 0, PmcRsx       , SET, 0, 0},
+    {PrkTsx      , offsetof(tPro, Pmc), 1, 0, PmcTsx       , SET, 0, 0},
+    {PrkPsl      , offsetof(tPro, Pmc), 1, 0, PmcPsl       , SET, 0, 0},
+    {PrkLegends  , offsetof(tPro, Pmc), 1, 0, PmcLegends   , SET, 0, 0},
+    {PrkSks      , offsetof(tPro, Pmc), 1, 0, PmcSks       , SET, 0, 0},
+    {PrkSnapStn  , offsetof(tPro, Pso), 1, 0, PsoSnapStn   , SET, 0, 0},
+    {PrkSnapSucc , offsetof(tPro, Pso), 1, 0, PsoSnapSucc  , SET, 0, 0},
+    {PrkSnapPred , offsetof(tPro, Pso), 1, 0, PsoSnapPred  , SET, 0, 0},
+    {PrkSnapScrl , offsetof(tPro, Pso), 1, 0, PsoSnapScrl  , SET, 0, 0},
+    {PrkSnapVars , offsetof(tPro, Pso), 1, 0, PsoSnapVars  , SET, 0, 0},
+    {PrkSnapRgns , offsetof(tPro, Pso), 1, 0, PsoSnapRgns  , SET, 0, 0},
+    {PrkSnapImage, offsetof(tPro, Pso), 1, 0, PsoSnapImage , SET, 0, 0},
+   {PrkSnapRelate, offsetof(tPro, Pso), 1, 0, PsoSnapRelate, SET, 0, 0},
+    {PrkSnapSks  , offsetof(tPro, Pms), 1, 0, PmsSnapSks   , SET, 0, 0},
+    {PrkSnapTbl  , offsetof(tPro, Pms), 1, 0, PmsSnapTbl   , SET, 0, 0},
+    {0           , 0                  , 0, 0, 0            , 0  , 0, 0}
+    };
+
+  Rc = CmdScanPost(                   /* scan and post command values */
+    (struct keytab *)ProKeyTable,     /* i/  - keyword table          */
+    PrkKeywordCount,                  /* i/  - keyword table entries  */
+    (struct postops *)ProOpsTable,    /* i/  - operand post control   */
+    (char *)ProString,                /* i/  - command string         */
+    Pro,                              /* i/  - control block to post  */
+    Msg                               /* i/  - error message buffer   */
+    );
+
+  /*
+  ** Notes: Currently
+  **        xxxRsx requires xxxRec to create xref entries
+  **        xxxTsx requires xxxRelate to create xref entries
+  */
+
+  return(Rc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* isattr - Test Ascii Image Char for 3270 attribute                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#define isattr(byte) \
+  (((byte) >= ATTR_RANGE_START) && ((byte) <= ATTR_RANGE_END))
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* isimgprint - Test for printable image character                    */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#define isimgprint(c) \
+  (isprint((c)))
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* TransSelText - Translate attribute-byte values to '@' characters   */
+/* and non-printable image characters to blanks.                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+static void TransSelText(char *src, int len)
+{
+
+  for ( ; len-- ; src++)
+    {
+    if (isimgprint(*src))
+      {
+      continue ;
+      }
+    else
+      {
+      *src = (isattr(*src) ? '@' : ' ');
+      }
+    }
+
+  return;
+
+}
+
+/*--------------------------------------------------------------------*/
+
+int RptTables(                         /* report on tables            */
+  tRcb *           Rcb,                /* i/  - report control block  */
+  struct stghdrq * StgQ,               /* i/  - storage anchor        */
+  tTkn *           ProjectToken        /* i/  - project token         */
+  )
+
+{
+
+  tTbs *           Tbs;
+  tTbsRc           TbsRc;
+  tRptRc           RptRc;
+  void *           Row;
+  int              Entry;
+  char             bufferí50ù;
+
+typedef struct tblentry
+  {
+  tTableNameZ      Name;
+  int              Size;
+  } ttblentry;
+
+/* sysdictionary tables */
+#define SysdictEntries 9
+static const  ttblentry TableNameíSysdictEntriesù =
+  {
+  /*----+----+----+-*/
+  {"SYSNAVIGATION   ",sizeof(struct snavsect)},
+  {"SYSCOLUMNS      ",sizeof(struct syscols )},
+  {"SYSTABLES       ",sizeof(struct systable)},
+  {"SYSRECORDINGS   ",sizeof(struct srecsect)},
+  {"SYSVARIABLES    ",sizeof(struct svarsect)},
+  {"SYSREGIONS      ",sizeof(struct sysrgn  )},
+  {"SYSIMAGES       ",sizeof(struct sysimage)},
+  {"SYSSKS          ",sizeof(struct syssks  )},
+  {"SYSSTATEMENTS   ",sizeof(struct sysstmt )}
+  };
+
+/*
+** syscatlg - in catalog space
+**   sysdictionary
+**   sysappls
+**   syspools
+**   sysproj_dir
+**   systems
+*/
+
+  for (Entry = 0; Entry < SysdictEntries; Entry++)
+    {
+
+    /*
+    ** Open table.
+    */
+
+    IfNull(Tbs,
+      TbsOpen(StgQ, ProjectToken,
+      (tTableName *)TableNameíEntryù.Name,
+      &TbsRc),
+      goto ErrTbsOpen);
+
+    /*
+    ** Read all rows and snap.
+    */
+
+    while(1)
+      {
+      TbsRc = TbsGet(Tbs, TpsNext, TgcNull, NULLP, NULLP, &Row);
+      if (TbsRc == TbsEndOfTable)
+        {
+        break;
+        }
+      if (TbsRc != TbsOk)
+        {
+        goto ErrTbsGet;
+        }
+      sprintf(buffer, "Snap of %s", TableNameíEntryù.Name);
+      IfNotZero(RptRc,
+        RptSnap(Rcb, buffer,
+        TableNameíEntryù.Size, Row),
+        goto ErrSnap);
+      } /* while */
+
+    IfNotZero(TbsRc, TbsClose(Tbs), goto ErrTbsClose);
+  } /* for */
+
+  return(0);
+
+ErrTbsOpen:
+ErrTbsGet:
+ErrSnap:
+  if (Tbs != NULLP)
+    {
+    TbsClose(Tbs);
+    }
+
+ErrTbsClose:
+  /* send an error message somewhere */
+  return(1);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Report on the recordings in which the screen (STN) participates.   */
+/* Add recording/screen xref entries.                                 */
+/*--------------------------------------------------------------------*/
+
+tRrcRc ReportRecordings(               /* report on screen's recording*/
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tRrc *           Rrc,                /* i/  - report recording ctrl */
+  tXca *           Xca,                /* i/  - xref control area     */
+  tPro *           Pro,                /* i/  - project report options*/
+  struct nvstn *   Stn                 /* i/  - state transition node */
+  )
+
+{
+
+  struct snavsect * Snavsect;          /* returned snavsect data addr */
+  struct srecsect * Srecsect;          /* returned srecsect data addr */
+  char             Screenísizeof(Stn->name)+1ù; /* search value       */
+  tColumnName *    SearchColumn;       /* search column name          */
+  tTbsRc           TbsRc;              /* table service return code   */
+  tRptRc           RptRc;              /* report return code          */
+  char             bufferí100ù;        /* work buffer                 */
+  char *           Value;
+  tRxe             Rxe;                /* recording/screen xref entry */
+
+  static const tColumnNameZ ColSnavlscr =
+    "SNAVLSCR        ";
+
+  static const tColumnNameZ ColSnavsset =
+    "SNAVSSET        ";
+
+  static const tColumnNameZ ColSrecname =
+    "SRECNAME        ";
+
+  static const tColumnNameZ ColSnavsrec =
+    "SNAVSREC        ";
+
+  /* break title */
+  if ((Pro->Pmc & PmcRec) != 0)
+    {
+    sprintf(buffer, REC);
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 4, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+
+    RECHDR;
+    }
+
+  /*
+  ** Build sysnavigation table search argument.
+  */
+
+  TbsSargInit(Rrc->NavTbs, TscAnd);    /* refresh search argument     */
+
+  Value = memstr(Screen, Stn->ssn, ' ', sizeof(Screen));
+
+  if (*Value == '\0')                  /* screen set ?                */
+    {
+    memcpy(Screen, Stn->name, sizeof(Stn->name)); /* no, use name     */
+    SearchColumn = (tColumnName *)&ColSnavlscr;
+    Rxe.Flag = SfgNull;                /* xref information            */
+    }
+  else
+    {
+    memcpy(Screen, Stn->ssn, sizeof(Stn->ssn)); /* yes, use set name  */
+    SearchColumn = (tColumnName *)&ColSnavsset;
+    Rxe.Flag = SfgScreenSet;           /* xref information            */
+    }
+
+  TbsSargAdd(
+    Rrc->NavTbs,
+    (tColumnName *)SearchColumn,
+    TsrEQ,
+    Screen,
+    sizeof(Stn->name)
+    );
+
+  /* set recording/screen xref data */
+  if ((Pro->Pmc & (PmcRsx | PmcPsl)) != 0)
+    {
+    memcpy(Rxe.Screen, Screen, sizeof(Stn->name));
+    Rxe.Page = Xca->StnPage;
+    }
+
+  /*
+  ** Retrieve each selected sysnavigation occurrences and report on it.
+  */
+
+  TbsRc = TbsSet(Rrc->NavTbs, TssTop, NULLP);
+
+  while(1)
+    {
+
+    /*
+    ** Select * from sysnavigation where ...
+    ** ... snavlscr = stn->name
+    ** or
+    ** ... snavsset = stn->ssn
+    */
+
+    TbsRc = TbsGet(Rrc->NavTbs, TpsNext, TgcSarg, NULLP, NULLP,
+      (void **)&Snavsect);
+
+    if (TbsRc == TbsEndOfTable)
+      {
+      break;
+      }
+
+    if (TbsRc != TbsOk)
+      {
+      goto ErrTbsGet;
+      }
+
+    /*
+    ** Select * from sysrecordings where srecname = snavsrec
+    */
+
+    TbsSargInit(Rrc->RecTbs, TscAnd);  /* refresh search argument     */
+
+    TbsSargAdd(
+      Rrc->RecTbs,
+      (tColumnName *)&ColSrecname,
+      TsrEQ,
+      Snavsect->snavsrec,
+      sizeof(Snavsect->snavsrec)
+      );
+
+    TbsRc = TbsSet(Rrc->RecTbs, TssTop, NULLP);
+
+    TbsRc = TbsGet(Rrc->RecTbs, TpsNext, TgcSarg, NULLP, NULLP,
+      (void **)&Srecsect);
+
+    if (TbsRc == TbsEndOfTable)
+      {
+      continue;
+      /* ignore navs without cooresponding recordings e.g. *RESUME* */
+/*    goto ErrGetRecError; */
+      /* break; */
+      }
+
+    if (TbsRc != TbsOk)
+      {
+      goto ErrTbsGet;
+      }
+
+    /* add recording/screen xref entry */
+    if ((Pro->Pmc & (PmcRsx | PmcPsl)) != 0)
+      {
+      memcpy(Rxe.Recording, Srecsect->srecname, sizeof(Rxe.Recording));
+      BlkAdd(Xca->RsxBcb, &Rxe);
+      }
+
+    /*
+    ** Write result
+    */
+
+    if ((Pro->Pmc & PmcRec) != 0)
+      {
+      RECALL(Snavsect, Srecsect);
+      }
+
+    TbsSargAdd(                        /* suppress dupes of recording */
+      Rrc->NavTbs,
+      (tColumnName *)ColSnavsrec,
+      TsrNE,
+      Snavsect->snavsrec,
+      sizeof(Snavsect->snavsrec)
+      );
+
+    } /* for (Rrc->Count ... */
+
+  if ((Pro->Pmc & PmcRec) != 0)
+    {
+    RECTAIL;
+    }
+
+  /* clear residual titles */
+  IfNotZero(RptRc, RptSetTitle(Rcb, 21, 0), goto ErrTitle);
+  IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrTitle);
+
+  return(RrcOk);
+
+ErrTbsGet:
+ErrGetRecError:
+ErrTitle:
+ErrWrite:
+  /* clear residual titles */
+  RptSetTitle(Rcb, 21, 0);
+  RptSetTitle(Rcb, 18, 0);
+  return(RrcError);
+
+}
+
+/*--------------------------------------------------------------------*/
+
+/*
+** Recording/screen xref
+*/
+
+#define RXEHDR(RXE, BUF)  \
+  "    Recording %s",     \
+  memstr(BUF, RXE->Recording, ' ', 16)
+
+/* with page numbers */
+#define FMTRXE(RXE, BUF)                        \
+  "%s%s%.*s%s%-5d",                             \
+  ((RXE->Flag & SfgScreenSet) != 0) ? "+" : "", \
+  memstr(BUF, RXE->Screen, ' ', 16),            \
+  (19 - strlen(BUF)),"...................",     \
+  ((RXE->Flag & SfgScreenSet) != 0) ? "" : ".", \
+  RXE->Page
+
+#define RXEALL(RXE, BUF) \
+  IfNotZero(RptRc, RptList(Lcb, FMTRXE(RXE,BUF)), goto ErrWrite)
+
+/* without page numbers */
+#define FMTRXE2(RXE,BUF)                        \
+  "%s%.16s%s",                                  \
+  ((RXE->Flag & SfgScreenSet) != 0) ? "+" : "", \
+  memstr(BUF, RXE->Screen, ' ', 16),            \
+  ((RXE->Flag & SfgScreenSet) != 0) ? "" : " "
+
+#define RXEALL2(RXE,BUF) \
+  RptListTabOn(Lcb);     \
+  IfNotZero(RptRc, RptList(Lcb, FMTRXE2(RXE,BUF)), goto ErrWrite); \
+  RptListTabOff(Lcb)
+
+/*
+** Table/screen xref
+*/
+
+#define TXEHDR(TXE, BUF)  \
+  "    Table %s",         \
+  memstr(BUF, TXE->Table, ' ', 18)
+
+/* with page numbers */
+#define FMTTXE(TXE, BUF) FMTRXE(TXE, BUF)
+
+#define TXEALL(TXE, BUF) \
+  IfNotZero(RptRc, RptList(Lcb, FMTTXE(TXE,BUF)), goto ErrWrite)
+
+/* without page numbers */
+#define FMTTXE2(TXE, BUF) FMTRXE2(TXE, BUF)
+
+#define TXEALL2(TXE, BUF) \
+  RptListTabOn(Lcb);      \
+  IfNotZero(RptRc, RptList(Lcb, FMTTXE2(TXE,BUF)), goto ErrWrite); \
+  RptListTabOff(Lcb)
+
+/*
+** Screen list
+*/
+
+#define SCRHDR(ENTRIES)
+
+/* need to drop duplicates from entries */
+/*
+#define SCRHDR(ENTRIES)   \
+  "    Screens: %d",      \
+  ENTRIES
+*/
+
+/* with page numbers */
+#define FMTSCR(RXE, BUF) FMTRXE(RXE, BUF)
+
+#define SCRALL(RXE, BUF) \
+  IfNotZero(RptRc, RptList(Lcb, FMTSCR(RXE,BUF)), goto ErrWrite)
+
+/* without page numbers */
+#define FMTSCR2(RXE, BUF)  FMTRXE2(RXE, BUF)
+
+#define SCRALL2(RXE, BUF) \
+  RptListTabOn(Lcb);      \
+  IfNotZero(RptRc, RptList(Lcb, FMTSCR2(RXE,BUF)), goto ErrWrite); \
+  RptListTabOff(Lcb)
+
+/*--------------------------------------------------------------------*/
+/* Write cross references.                                            */
+/* - Recording/Screen with and without Screen's page number           */
+/* - Table/Screen with and without Screen's page number               */
+/* - Screen list with and without Screen's page number                */
+/*                                                                    */
+/* Notes: the inclusion of a screen's page number is dependent upon   */
+/* prior screen detail having been reported.                          */
+/*--------------------------------------------------------------------*/
+
+tRptRc Xref(                           /* write xrefs                 */
+  tRcb *           Rcb,                /* i/  - report control block  */
+  tLcb *           Lcb,                /* i/  - list control block    */
+  tXca *           Xca,                /* i/  - xref control area     */
+  tPro *           Pro                 /* i/  - project report options*/
+  )
+
+{
+
+  tRptRc           RptRc;              /* return code                 */
+  tRxe *           Rxe;                /* recording/screen xref entry */
+  tTxe *           Txe;                /* table/screen xref entry     */
+  int              Count;              /* entry counter               */
+  int              Entries;            /* number of xref entries      */
+  char             bufferí80ù;         /* work buffer                 */
+  char             buffer2í19ù;        /* work buffer                 */
+
+  char             CurrentRecordingí16ù = {mR16(0xff)};
+  char             CurrentScreení16ù = {mR16(0xff)};
+  char             CurrentTableí18ù = {mR16(0xff),mR2(0xff)};
+
+  static const char InitScreení16ù = {mR16(0xff)};
+
+  if (Xca == NULLP)
+    {
+    return(0);
+    }
+
+  /*
+  ** RECORDING/SCREEN XREF
+  */
+
+  if (((Xca->RsxBcb) != NULLP)
+    && ((Pro->Pmc & PmcRsx) != 0)
+    && ((Entries = BlkEntries(Xca->RsxBcb)) != 0))
+    {
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, "Recording/Screen cross reference"),
+      goto ErrTitle);
+
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+    IfNotZero(RptRc, RptWriteHeaders(Rcb), goto ErrWrite);
+
+    sprintf(buffer, " Recording/Screen cross reference");
+    IfNotZero(RptRc, RptWrite(Rcb, 1, 1, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, buffer), goto ErrWrite);
+
+    /*
+    ** Sort xref entries into recording-name, screen name order
+    */
+
+    BlkSort(Xca->RsxBcb, CmpRxe);
+
+    /*
+    ** Write recording/screen xref with report breaks on recording
+    ** name.
+    */
+
+    RptListTabOff(Lcb);                  /* turn off tab stops        */
+
+    for (Count = 0; Count < Entries; Count++)
+      {
+
+      Rxe = BlkSeekPtr(Xca->RsxBcb, Count, BorSet);
+
+      /* break on recording name */
+      if (memcmp(CurrentRecording, Rxe->Recording,
+        sizeof(Rxe->Recording)) != 0)
+        {
+        RptListFlush(Lcb);
+        memcpy(CurrentRecording, Rxe->Recording,
+          sizeof(Rxe->Recording));
+
+        IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrWrite);
+        sprintf(buffer, RXEHDR(Rxe,buffer2));
+        IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+        strcat(buffer, " (continued)");
+        IfNotZero(RptRc, RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+        }
+
+      if ( ((Pro->Pco & PcoHdr) != 0)  /* page number available ?     */
+        || ((Pro->Pmc & PmcHdr) != 0)
+        || ((Pro->Pso & PsoHdr) != 0)
+        || ((Pro->Pms & PmsHdr) != 0))
+        {
+        RXEALL(Rxe, buffer);           /* yes, use it                 */
+        }
+      else
+        {
+        RXEALL2(Rxe, buffer);          /* no, write w/o page numbers  */
+        }
+
+      } /* for */
+
+    RptListFlush(Lcb);                   /* flush list buffer         */
+
+    /* clear residual titles */
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, 0),
+      goto ErrTitle);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrWrite);
+  } /* if (((Xca->RsxBcb) != NULLP) ... */
+
+  /*
+  ** TABLE/SCREEN XREF
+  */
+
+  if (((Xca->TsxBcb) != NULLP)
+    && ((Pro->Pmc & PmcTsx) != 0)
+    && ((Entries = BlkEntries(Xca->TsxBcb)) != 0))
+    {
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, "Table/Screen cross reference"),
+      goto ErrTitle);
+
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+    IfNotZero(RptRc, RptWriteHeaders(Rcb), goto ErrWrite);
+
+    sprintf(buffer, " Table/Screen cross reference");
+    IfNotZero(RptRc, RptWrite(Rcb, 1, 1, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, buffer), goto ErrWrite);
+
+    /*
+    ** Sort xref entries into table-name, screen name order
+    */
+
+    BlkSort(Xca->TsxBcb, CmpTxe);
+
+    for (Count = 0; Count < Entries; Count++)
+      {
+
+      Txe = BlkSeekPtr(Xca->TsxBcb, Count, BorSet);
+
+      /* break on table name */
+      if (memcmp(CurrentTable, Txe->Table,
+        sizeof(Txe->Table)) != 0)
+        {
+        RptListFlush(Lcb);
+        memcpy(CurrentTable, Txe->Table, sizeof(Txe->Table));
+
+        IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrWrite);
+        sprintf(buffer, TXEHDR(Txe,buffer2));
+        IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+        strcat(buffer, " (continued)");
+        IfNotZero(RptRc, RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+
+        memcpy(CurrentScreen, InitScreen, sizeof(CurrentScreen));
+        }
+
+      /* skip table name, screen name duplicates */
+      if (memcmp(CurrentScreen, Txe->Screen,
+        sizeof(Txe->Screen)) != 0)
+        {
+        memcpy(CurrentScreen, Txe->Screen, sizeof(Txe->Screen));
+        if ( ((Pro->Pco & PcoHdr) != 0)  /* page number available ?   */
+          || ((Pro->Pmc & PmcHdr) != 0)
+          || ((Pro->Pso & PsoHdr) != 0)
+          || ((Pro->Pms & PmsHdr) != 0))
+          {
+          TXEALL(Txe, buffer);           /* write screen/page in list */
+          }
+        else
+          {
+          TXEALL2(Txe, buffer);          /* write w/o page number     */
+          }
+        }
+
+      } /* for */
+
+    RptListFlush(Lcb);                   /* flush list buffer         */
+
+    /* clear residual titles */
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, 0),
+      goto ErrTitle);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrWrite);
+  } /* if (((Xca->TsxBcb) != NULLP) ... */
+
+  /*
+  ** Screen list
+  */
+
+  if (((Xca->RsxBcb) != NULLP)
+    && ((Pro->Pmc & PmcPsl) != 0)
+    && ((Entries = BlkEntries(Xca->RsxBcb)) != 0))
+    {
+
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, "Screen List"),
+      goto ErrTitle);
+
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+    IfNotZero(RptRc, RptWriteHeaders(Rcb), goto ErrWrite);
+
+    sprintf(buffer, " Screen List");
+    IfNotZero(RptRc, RptWrite(Rcb, 1, 1, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, buffer), goto ErrWrite);
+
+    /*
+    ** Sort xref entries into screen name order
+    */
+
+    BlkSort(Xca->RsxBcb, CmpRxeScr);
+
+    /*
+    ** Write screen list
+    */
+
+    RptListTabOff(Lcb);                  /* turn off tab stops        */
+
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 2, " "), goto ErrWrite);
+/*
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, 0), goto ErrWrite);
+    sprintf(buffer, SCRHDR(Entries));
+    IfNotZero(RptRc, RptWrite(Rcb, 2, 3, buffer), goto ErrWrite);
+    strcat(buffer, " (continued)");
+    IfNotZero(RptRc, RptSetTitle(Rcb, 18, buffer), goto ErrTitle);
+*/
+
+    memcpy(CurrentScreen, InitScreen, sizeof(CurrentScreen));
+
+    for (Count = 0; Count < Entries; Count++)
+      {
+
+      Rxe = BlkSeekPtr(Xca->RsxBcb, Count, BorSet);
+
+      /* skip duplicates */
+      if (memcmp(CurrentScreen, Rxe->Screen, sizeof(Rxe->Screen)) != 0)
+        {
+        memcpy(CurrentScreen, Rxe->Screen,sizeof(Rxe->Screen));
+
+        if ( ((Pro->Pco & PcoHdr) != 0)  /* page number available ?   */
+          || ((Pro->Pmc & PmcHdr) != 0)
+          || ((Pro->Pso & PsoHdr) != 0)
+          || ((Pro->Pms & PmsHdr) != 0))
+          {
+          SCRALL(Rxe, buffer);           /* yes                       */
+          }
+        else
+          {
+          SCRALL2(Rxe, buffer);          /* no                        */
+          }
+        }
+      } /* for */
+
+    RptListFlush(Lcb);                   /* flush list buffer         */
+
+    /* clear residual titles */
+    IfNotZero(RptRc,
+      RptSetTitle(Rcb, 4, 0),
+      goto ErrTitle);
+    IfNotZero(RptRc, RptSetTitle(Rcb, 15, 0), goto ErrWrite);
+  } /* if (((Xca->RsxBcb) != NULLP) ... */
+
+  RptListTabOn(Lcb);
+
+  return(0);
+
+ErrWrite:
+ErrTitle:
+  RptSetTitle(Rcb, 18, 0);
+  RptSetTitle(Rcb, 15, 0);
+  RptListTabOn(Lcb);
+
+  return(RptRc);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* compare RXEs to sort into ascending recording name, screen name    */
+/* order                                                              */
+/*--------------------------------------------------------------------*/
+
+int CmpRxe(                            /* compare xref entries        */
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+#define Rxe1 ((tRxe *)Entry1)
+#define Rxe2 ((tRxe *)Entry2)
+
+  int              Rc;
+
+  /* recording name */
+  if ((Rc = memcmp(Rxe1->Recording, Rxe2->Recording,
+    sizeof(Rxe1->Recording))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* screen name */
+  return(memcmp(Rxe1->Screen, Rxe2->Screen, sizeof(Rxe2->Screen)));
+
+#undef Rxe1
+#undef Rxe2
+
+}
+
+
+/*--------------------------------------------------------------------*/
+/* compare RXEs to sort into ascending screen name order              */
+/*--------------------------------------------------------------------*/
+
+int CmpRxeScr(                         /* compare xref entries        */
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+#define Rxe1 ((tRxe *)Entry1)
+#define Rxe2 ((tRxe *)Entry2)
+
+  /* screen name */
+  return(memcmp(Rxe1->Screen, Rxe2->Screen, sizeof(Rxe2->Screen)));
+
+#undef Rxe1
+#undef Rxe2
+
+}
+
+/*--------------------------------------------------------------------*/
+/* compare TXEs to sort into ascending table name, screen name order. */
+/*--------------------------------------------------------------------*/
+
+int CmpTxe(                            /* compare xref entries        */
+  const void *     Entry1,
+  const void *     Entry2
+  )
+
+{
+
+#define Txe1 ((tTxe *)Entry1)
+#define Txe2 ((tTxe *)Entry2)
+
+  int              Rc;
+
+  /* recording name */
+  if ((Rc = memcmp(Txe1->Table, Txe2->Table,
+    sizeof(Txe1->Table))) != 0)
+    {
+    return(Rc);
+    }
+
+  /* screen name */
+  return(memcmp(Txe1->Screen, Txe2->Screen, sizeof(Txe2->Screen)));
+
+#undef Txe1
+#undef Txe2
+
+}
+

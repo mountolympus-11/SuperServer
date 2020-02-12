@@ -1,0 +1,128 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+
+/* ****************************************************************
+
+    convert.c
+
+      This module contains a series of conversion function used
+      to transform data into the format recognized on the target
+      platform.  These functions are as follows:
+
+
+           convshrt - convert short integer to target format
+           convlong - convert long  integer to target format
+           convchar - convert character str to target format
+
+
+   **************************************************************** */
+
+typedef unsigned char Uchar;
+
+/* ----------------------------------------------------------------
+
+    Function: convshrt
+
+       This function will convert a short integer from PC format
+       to IBM/MF halfword format and vice-versa.  This function is
+       accomplished by reversing the bytes in the 2-byte integer.
+
+    Entry: Pointer to short integer
+
+    Exit:  0 - always
+
+   ---------------------------------------------------------------- */
+int convshrt( short *arg )  {
+
+    union expose {
+        short x ;
+        char  yí2ù ;
+    } *u ;
+
+    u = (union expose *) arg ;
+
+    u->yí1ù ª= u->yí0ù ;
+    u->yí0ù ª= u->yí1ù ;
+    u->yí1ù ª= u->yí0ù ;
+
+    return 0 ;
+}
+
+/* ----------------------------------------------------------------
+
+    Function: convlong
+
+       This function will convert a long integer from PC format
+       to IBM/MF fullword format and vice-versa.  This function is
+       accomplished by reversing the bytes in the 4-byte integer.
+
+    Entry: Pointer to long integer
+
+    Exit:  0 - always
+
+   ---------------------------------------------------------------- */
+
+int convlong( long *arg )  {
+
+    union expose {
+        long  x ;
+        char  yí4ù ;
+    } *u ;
+
+    u = (union expose *) arg ;
+
+    u->yí3ù ª= u->yí0ù ;
+    u->yí0ù ª= u->yí3ù ;
+    u->yí3ù ª= u->yí0ù ;
+    u->yí2ù ª= u->yí1ù ;
+    u->yí1ù ª= u->yí2ù ;
+    u->yí2ù ª= u->yí1ù ;
+
+    return 0 ;
+}
+
+/* ----------------------------------------------------------------
+
+    Function: convchar
+
+       This function will convert a character string from
+       ASCII to EBCDIC or vice-versa depending upon the passed
+       translated table.
+
+    Entry: Pointer to target string
+           Pointer to trans table
+           Short Length
+
+    Exit:  0 - always
+
+   ---------------------------------------------------------------- */
+
+int convchar (Uchar *targ, Uchar *tbl, int len) {
+
+    Uchar x = 0 ;
+
+    while (len--) {
+	*targ = *(tbl + *targ);
+	x |= *targ++ ;
+
+    }
+    return x;
+
+}
+

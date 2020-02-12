@@ -1,0 +1,143 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <string.h>
+#include <lclib.h>
+#include "env.h"
+#include "msg.h"
+#include "stgmgr.h"
+#include "procsrv.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpschd.h"
+
+#define  ITM_HXP_RECV   101            /* TSEND RU SCHED MSGTYPE */
+
+/* *************************************************************
+
+   Function: RUsched - Request Unit Schedule routine
+
+   Description:
+
+     This function will send the request unit (RU) transaction
+     to the owning appl's USER process.  The associated user
+     process is responsible for calling the RU scheduler to
+     process the request.  The address of the logical session
+     handle is provided in the parm1 field of the tsend parms.
+
+   Parameters: Addr of psess structure
+               Addr of lsess structure
+               Addr of Request unit
+               Len  of Request unit
+
+   Returns:    HXP_OK    - RU sent to User process
+               ERR_TSEND - Error occurred sending to User process
+
+   ************************************************************* */
+
+int RUsched( struct psess *ps, struct lsess *ls, char *ru, int rulen)
+{
+
+    struct appl  *ap ;
+    struct tsendparms p ;
+
+    union {
+        LSESH handle ;
+        long  parm ;
+    } h ;
+
+    ap = ls->appl ;
+
+    h.handle = ls->sesshndl ;
+    p.parm1  = (void *) h.parm ;
+    p.parm2  = p.parm3 = p.parm4 = 0 ;
+
+    if ( tsend( "*", ap->procname, ITM_HXP_RECV , ru, rulen, &p ) )
+        return ERR_TSEND ;
+
+    return HXP_OK ;
+
+}
+
+
+/* *************************************************************
+
+   Function: addUSER - Create user session process
+
+   Description:
+
+      This function will create a new user process on behalf
+      of a NEWSESS hostorder.  The process name is generated
+      with the name of USERnnnn, where nnnn is the APPLid of
+      of the newly create appl session.
+
+   Parameters: Addr of appl structure
+
+   Returns:    HXP_OK   - User process successfully created
+               HXP_FAIL - User process create failed
+
+   ************************************************************* */
+
+int addUSER( struct appl *ap ) {
+
+    struct psess *ps ;
+
+    struct pcb   *pcb, *mypcb ;
+    char   pcbsfxí8ù ;
+
+    ps = ap->ps ;
+
+    mypcb = (struct pcb *) locwuhdr( SCOPE_PCB ) ;
+    memset( pcbsfx, 0, sizeof pcbsfx ) ;
+    memcpy( pcbsfx, &mypcb->pcbnameí4ù, 4 ) ;
+
+    format( ap->procname,"UP%s%0.2d", pcbsfx, ap->applid ) ;
+
+    pcb = proccre( ap->procname, ps->usrproc, ap, DFTDPRTY, DFTSTGSZ ) ;
+
+    if ( ap->pcb = (void *) pcb )
+        return HXP_OK ;
+    else
+        return HXP_FAIL ;
+}
+
+
+/* *************************************************************
+
+   Function: delUSER - Terminate user session process
+
+   Description:
+
+      This function will signal the User process to terminate
+      (STOP) on behalf of a Killsess host order.
+
+   Parameters: Addr of appl structure
+
+   Returns:    HXP_OK - User process notified to terminate
+
+   ************************************************************* */
+
+int delUSER( struct appl *ap ) {
+
+    if ( ap->pcb )
+        procstp( ap->pcb ) ;
+
+    return HXP_OK ;
+
+}

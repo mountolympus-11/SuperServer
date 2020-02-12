@@ -1,0 +1,159 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module:  ICOMCPIC -  Communication request services (CPI-C)        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This module contains the function which host xport services    *
+*      will invoke to communicate with LU 6.2 managed Xport session   *
+*      partners.  The address of the communication request routine    *
+*      is contained in the Xport profile table entry.                 *
+*                                                                     *
+*  Functions:                                                         *
+*                                                                     *
+*     comcpic - CPI-C Communication request routine                   *
+*                                                                     *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/14/94 R. Colmone          Par# 134222                        *
+*              Initial Version                                        *
+*                                                                     *
+**********************************************************************/
+
+#include <stddef.h>
+#include "env.h"
+#include "cmincl.h"
+#include "sess.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpctrc.h"
+#include "hxpcpic.h"
+
+/**********************************************************************
+*                                                                     *
+*  Function:  comcpic - Communication request routine ( CPI-C )       *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is used to invoke the appropriate CPI-C           *
+*     service as requested by host Xport services.                    *
+*                                                                     *
+*                                                                     *
+*  Parameters: Address of PSESS (Primary session block)               *
+*              request type                                           *
+*              Address of Data area                                   *
+*              Length  of Data area                                   *
+*                                                                     *
+*  Returns:    Return Code from Communication services                *
+*                 0 - Request completed successfully                  *
+*                ~0 - Request failed                                  *
+*                                                                     *
+**********************************************************************/
+
+int comcpic( struct psess  *ps,
+             int    request,
+             void   *data,
+             int    datalen )
+{
+
+    struct xpcpic *cpic ;
+
+    cpic     = (struct xpcpic *) ps->commblk ;
+
+    cpic->rc = CM_OK ;
+
+/*  -----------------------------------------------------------------
+    If this is a send request,  issue the CPI-C send followed by
+    a CPI-C flush request to flush the data buffers.  reset the
+    communication state indicators to indicate that we should
+    proceed into receive mode.
+    ----------------------------------------------------------------- */
+    if ( request == SEND_DATA ) {
+
+        cpic->requestedlength = datalen ;
+        strcpy( cpic->functionname, "CMSEND" ) ;
+
+        cmsend( cpic->convid,
+                (unsigned char CM_PTR) data,
+                &cpic->requestedlength,
+                &cpic->rtsreceived,
+                &cpic->rc ) ;
+
+        cpictrc( cpic ) ;
+
+        if ( cpic->rc != CM_OK ) {
+            hxpcerr( cpic ) ;
+            return cpic->rc ;
+        }
+
+        if ( cpic->rtsreceived == CM_REQ_TO_SEND_RECEIVED )
+            cpic->cstatus |= STATUS_RTSRECV ;
+
+/*      strcpy( cpic->functionname, "CMFLUS" ) ;
+        cmflus( cpic->convid, &cpic->rc ) ;
+        cpictrc( cpic ) ;                            */
+
+        strcpy( cpic->functionname, "CMECS" ) ;
+        cmecs( cpic->convid, &cpic->convstate, &cpic->rc ) ;
+        cpictrc( cpic ) ;
+
+        cpic->cstatus &= ~MODE_SEND ;
+        cpic->cstatus &= ~MODE_SENDPEND ;
+        cpic->cstatus |=  MODE_RECEIVE ;
+
+    }
+
+/*  -----------------------------------------------------------------
+    If this is a terminate session request,  issue the CPI-C
+    set deallocate type request and then deallocate the session.
+    ----------------------------------------------------------------- */
+    else if ( request == END_SESSION ) {
+
+        strcpy( cpic->functionname, "CMSDT" ) ;
+        cpic->deallocatetype = CM_DEALLOCATE_FLUSH ;
+
+        cmsdt( cpic->convid, &cpic->deallocatetype, &cpic->rc ) ;
+        cpictrc( cpic ) ;
+
+        if ( cpic->rc != CM_OK ) {
+            hxpcerr( cpic ) ;
+            return cpic->rc ;
+        }
+
+        strcpy( cpic->functionname, "CMDEAL" ) ;
+        cmdeal( cpic->convid, &cpic->rc ) ;
+
+        cpictrc( cpic ) ;
+
+        if ( cpic->rc != CM_OK ) {
+            hxpcerr( cpic ) ;
+            return cpic->rc ;
+        }
+
+    }
+
+    return cpic->rc ;
+
+}
+

@@ -1,0 +1,456 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+
+#include <string.h>
+#include <ctype.h>
+#include "cmdscan.h"
+#include "env.h"
+/* #include "idebug.h" */
+
+
+enum datatype  {                /* data types summary                */
+    type_integer,               /* decimal digits                    */
+    type_string,                /* character string (just, padded)   */
+    type_addopt,                /* option assertion - OR in bits     */
+    type_delopt,                /* option denial    - AND out bits   */
+    type_size                   /* dec digits, opt B, K, or M suffix */
+} ;
+
+
+struct keytab  *keyloc(  struct keytab  *key,  int keyid ) ;
+struct postops *postloc( struct postops *post, int keyid, int valno ) ;
+int prmdtyp( struct keytab *key, struct postops *post ) ;
+
+
+/* *****************************************************************
+
+     Function:  PRMPOST - Post scanned parms/values to option block
+
+     Description:
+
+        This function may be used to convert keywords and their
+        associated values to their appropriate representations in
+        an option control block.  The option control block is some
+        data area that retains the values of parameters in a
+        convenient internal structure containing numeric fields,
+        character strings and bit flags.
+
+        The caller provides a keyword table (struct KEYTAB) and a
+        a POSTOPS table which maps each keyword and its respective
+        values into the option block.  A third structure, referred
+        to as the OPLIST, parallels the KEYTAB and is used to
+        represent an instance of complete parameter list / command.
+
+        When the OPLIST is not provided, the default values defined
+        in POSTOPS, if any, are applied to the option block.  If
+        an error is encountered, *entry_in_error contains a pointer
+        to the failing POSTOPS entry.  The "defaults" posting pass
+        can be resumed by recalling this function providing the
+        original KEYTAB table and a pointer to the POSTOPS entry
+        following the entry returned in-error.  Note that errors in
+        default value specifications are programming errors and
+        are never the result of improper data provided by a user.
+
+        When an OPLIST is provided, the keywords and values encoded
+        in that structure are applied to the option block.  If an
+        error is encountered, *entry_in_error contains a pointer to
+        the failing KEYTAB entry, which can in turn be used to
+        identify the failing OPLIST entry. (The nth KEYTAB entry is
+        paired with the nth OPLIST entry).  The "actuals" posting
+        pass can be resumed by recalling this function providing
+        the original POSTOPS table and pointers to the KEYTAB
+        and OPLIST entries following those returned in-error.
+
+        In either case, when an error is detected, *entry-in-error,
+        is provided so that parameter processing can continue.
+        error_info is ptr to cl16 field that will contain a terse
+        text string generically describing the type of errror
+        encountered.
+
+   ***************************************************************** */
+
+/* *****************************************************************
+
+     Maintenance:
+
+        11/08/94 R. Turgeon
+                 Implemented SIZE data type allowing specification
+                 of numeric values in terms of bytes, Kb, or Mb.
+                 Also included more stringent validation of
+                 decimal integer values.
+
+   ***************************************************************** */
+
+int prmpost(
+    struct keytab  *key,        /* keyword table (CONST)             */
+    struct oplist  *op,         /* keyword/value instances           */
+    struct postops *post,
+    void   *cb,
+    void   **entry_in_error,
+    char   *error_info )
+{
+
+    int    vlen, err, dt, dq, opc, i ;
+    char   *vptr, *msgtoken ;
+    struct opvalues *opv ;
+    struct keytab   *keysel ;
+    struct postops  *postorg ;
+
+    postorg = post ;
+    err     = FALSE ;
+
+/*  -----------------------------------------------------------------
+     Process parameter defaults
+    ----------------------------------------------------------------- */
+
+    if ( ! op )  {
+
+        for ( ; ! err && post->kwdid ; post++ )  {
+
+            if ( post->dftptr )  {
+
+                if ( ! ( keysel = keyloc( key, post->kwdid ) ) )
+                    err = err_keyid ;
+
+                else  {
+                    if ( ( dt = prmdtyp( keysel, post ) ) < 0 )
+                        err = -dt ;
+
+                    else  {
+                        if ( dt == type_addopt ÝÝ dt == type_delopt )  {
+                            vptr = &post->mask ;
+                            vlen = 1 ;
+                        }
+
+                        else  {
+                            vptr = post->dftptr ;
+                            vlen = post->dftlen ;
+                        }
+
+                        dq  = keysel->dataqual ;
+                        err = prmpval( post, dt, dq, vptr, vlen, cb ) ;
+                    }
+                }
+            }
+
+            if ( err )
+                *entry_in_error = post ;
+        }
+    }
+
+/*  -----------------------------------------------------------------
+     Process actual parameter instances
+    ----------------------------------------------------------------- */
+
+    else  {
+
+        for ( ; ! err && key->id_no ; key++, op++ )  {
+
+            dq = key->dataqual ;
+
+            if ( op->opspec && ! op->opscan )  {
+                op->opscan = TRUE ;
+
+                if ( post = postloc( postorg, key->id_no, 0 ) )  {
+
+                    if ( ( dt = prmdtyp( key, post ) ) < 0 )
+                        err = -dt ;
+
+                    else  {
+                        vptr = &post->mask    ;
+                        vlen = 1 ;
+                        err  = prmpval( post, dt, dq, vptr, vlen, cb ) ;
+                    }
+                }
+
+                opc = op->opcount ;
+                opv = &op->opvalí0ù ;
+
+                for ( i = 1 ; opc-- && ! err ; opv++, i++ )    {
+
+                    if ( post = postloc( postorg, key->id_no, i ) )  {
+
+                        if ( ( dt = prmdtyp( key, post ) ) < 0 )
+                            err = -dt ;
+
+                        else if ( opv->opadr )  {
+                            vptr = opv->opadr ;
+                            vlen = opv->oplen ;
+                            err = prmpval(post, dt, dq, vptr, vlen, cb);
+                        }
+                    }
+                }
+
+                if ( err )
+                    *entry_in_error = key ;
+            }
+        }
+    }
+
+/*  -----------------------------------------------------------------
+     Provide terse message token if errors encountered
+    ----------------------------------------------------------------- */
+
+    if ( err && error_info )  {
+
+        switch ( err )  {
+
+            case err_keyid:
+                msgtoken = "Keyword ID" ;
+                break ;
+
+            case err_size:
+                msgtoken = "Value size" ;
+                break ;
+
+            case err_datatype:
+                msgtoken = "Data type" ;
+                break ;
+
+            case err_conflict:
+                msgtoken = "Definition" ;
+                break ;
+
+            case err_range:
+                msgtoken = "Value range" ;
+                break ;
+
+            default:
+                msgtoken = "Unknown" ;
+                break ;
+        }
+
+        strcpy( error_info, msgtoken ) ;
+    }
+
+    return ( err ) ;
+}
+
+/* *****************************************************************
+
+     Function:  prmdtyp - determine datatype
+
+     Description:
+
+        This function validates that the value represented by the
+        POSTOPS entry is consistent with the keyword definition
+        provided in the KEYTAB entry.  A POSTOPS reference to value
+        #0 is interpreted as a reference to the presence of the
+        keyword itself, without regard to values.
+
+   ***************************************************************** */
+
+int prmdtyp( struct keytab *key, struct postops *post )  {
+
+    if ( post->valno == 0 )  {
+
+        if ( ! post->mask ÝÝ ! post->opt )
+            return ( -err_conflict ) ;
+
+        if ( (signed char) post->opt > 0 )
+            return type_addopt ;
+        else
+            return type_delopt ;
+    }
+
+    else  {
+        if ( post->valno > key->maxval )
+            return ( -err_conflict ) ;
+
+        if ( key->datatype == NUMERIC )
+            return type_integer ;
+
+        if ( key->datatype == SIZE )
+            return type_size ;
+
+        return type_string ;
+    }
+
+    return ( -err_datatype ) ;
+}
+
+
+/* *****************************************************************
+
+     Function:  prmpval - post value to target option block
+
+     Description:
+
+        The operand value identified by *VALUE and VALLEN is posted
+        in the control block field described by *POST and addressed
+        via CB.  The function is capable of applying integer, size,
+        character string, and bit value updates to CB.
+
+   ***************************************************************** */
+
+int prmpval(
+    struct postops *post,
+    int    datatype,
+    int    dataqual,
+    char   *value,
+    int    vallen,
+    void   *cb )
+{
+
+    int  ilen, intval, multiplier = 1 ;
+    char wkareaí10ù ;
+    void *target ;
+
+    target = (char *) cb + post->displ ;
+
+
+/*  ---- INTEGER or SIZE -------------------------------------------- */
+
+    if ( datatype == type_integer || datatype == type_size )  {
+
+        if ( vallen > 9 )
+            return err_size ;
+
+        memset( wkarea, 0, sizeof wkarea ) ;
+        memcpy( wkarea, value, vallen ) ;
+
+        ilen = strspn(wkarea, "0123456789") ;
+
+        if ( datatype == type_integer && ilen != vallen )
+            return err_datatype ;
+
+        if ( datatype == type_size )  {
+
+            if ( ilen != vallen )  {
+
+                if ( ilen != --vallen )
+                    return err_datatype ;
+
+                dataqual = toupper( *(wkarea + vallen) ) ;
+            }
+
+            switch( dataqual )  {
+
+                case  0 :
+                case 'B':
+                    multiplier = 1 ;
+                    break ;
+
+                case 'K':
+                    multiplier = 1024 ;
+                    break ;
+
+                case 'M':
+                    multiplier = 1024 * 1024 ;
+                    break ;
+
+                default:
+                    multiplier = 0 ;
+            }
+
+            if ( multiplier == 0 )
+                return err_datatype ;
+        }
+
+        intval = atoi( wkarea ) * multiplier ;
+
+        if ( post->maxval &&
+           ( intval < post->minval || intval > post->maxval) )
+
+            return err_range ;
+
+        if ( post->length == sizeof( char ) )
+            *(char*)target = intval ;
+
+        else if ( post->length == sizeof( short ) )
+            *(short*)target = intval ;
+
+        else if ( post->length == sizeof( int ) )
+            *(int*)target = intval ;
+
+        else
+            return err_datatype ;
+    }
+
+
+/*  --- CHARACTER STRING ------------------------------------------- */
+
+    else if ( datatype == type_string )  {
+
+        if ( vallen > post->length )
+            return err_size ;
+
+        memset ( target, ' ', post->length ) ;
+        memcpy ( target, value, vallen ) ;
+    }
+
+
+/*  --- SET or RESET FLAG BITS ------------------------------------- */
+
+    else if ( datatype == type_addopt )
+        *(char*)target |= *value ;
+
+    else if ( datatype == type_delopt )
+        *(char*)target &= ~*value ;
+
+    return 0 ;
+}
+
+
+/* *****************************************************************
+
+   Function:  keyloc - locate keyword definition in keyword table
+
+   Description:
+
+      The KEYTAB table is searched for the first occurance of a
+      keyword definition having the indicated keyword id. Integral
+      keyword ids provide a portable matching procedure not sensitive
+      to platform dependent string representations, etc.
+
+   ***************************************************************** */
+
+struct keytab *keyloc( struct keytab *key, int keyid ) {
+
+    for ( ; key->keywordí0ù ; key++ )
+        if ( key->id_no == keyid )
+            return key ;
+
+    return 0 ;
+}
+
+
+/* *****************************************************************
+
+   Function:  postloc - locate keyword definition in postops table
+
+   Description:
+
+      POSTOPS entries are related to keyword defintions by matching
+      both keyword id (required in this application) and an index
+      identifying a value in the value list, if any. A zero index
+      is used to identify any occurance of the keyword, regardless
+      of the presence or omission of a value list.
+
+   ***************************************************************** */
+
+struct postops *postloc( struct postops *post, int keyid, int valno )  {
+
+    for ( ; post->kwdid ; post++ )
+        if ( post->kwdid == keyid && post->valno == valno )
+            return post ;
+
+    return 0 ;
+}
+

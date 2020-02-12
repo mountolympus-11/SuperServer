@@ -1,0 +1,763 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "convert.h"
+#include "systbls.h"
+#include "region.h"
+#include "rgnprv.h"
+
+/* ==================================================================
+
+    This file consists of a series of functions used to create and
+    maintain a group of related region definitions referred to as a
+    "region network" (a tree, actually).  The network consists of a
+    header mapped by struct RGNTREE and zero or more entries mapped
+    by struct RGNTRY.  The RGNTRY node contains a pointer to the
+    associated region definition (struct SYSRGN).  The RGNTREE itself
+    contains a RGNTRY that defines the dimensions of the screen
+    image.  Subregions, when present, subdivide the area described by
+    the (parent) region.  The following functions form the region
+    network maintenance API.  Other functions contained in this file
+    are intended for internal use only.
+
+        rgnnet  - initialize struct RGNTREE. A list of RGNTRYs
+                  may be provided to populate the region network.
+
+        rgnadd  - attach a subregion rgntry to its parent region
+        rgnupd  - update a region entry in place (after validation)
+        rgndel  - delete a region entry and all attached subregions
+
+        rgnloc  - locate a region entry by region name
+
+        rgnwloc - locate non-repeating parent region of a given
+                  WRAP region
+
+        rgnverf - validate region definitions for completness and
+                  consistency
+
+        rgnprio - assign materialization priority to region entry
+
+   ================================================================== */
+
+
+/* ******************************************************************
+
+    Function: rgnnet - construct region network from sysrgn array
+
+    Description:
+
+        A tree is constructed from the array of SYSRGN ptrs passed
+        to this function.  Then, parentage and specificity-within-
+        parent linkages are established by making repeated calls
+        to rgnadd.
+
+    Notes:
+
+        All region definitions attached to the region network by this
+        function have their change (SRF_CHG) and delete (SRF_DEL)
+        flags reset.  Upon termination, those regions having either
+        flag set must be posted to or removed from the database.
+
+    Returns:
+
+        0          - region network constructed
+        err_PARENT - parent region not defined for some region
+        n > 0      - rgnadd failure completion code
+
+   ****************************************************************** */
+
+int rgnnet(
+    struct rgntree *rt,     /* region tree anchor                     */
+    struct rgninfo *ri,     /* region error diagnostics               */
+    struct rgntry rníù,     /* array of preinitialized network nodes  */
+    int    Ncount )         /* number of preinited network nodes      */
+
+{
+    int    i, j, rc = 0 ;
+    struct rgntry *rnxt ;
+
+    memset( rt, 0, RGNTRELN ) ;
+    memset( ri, 0, RGNINFLN ) ;
+
+    rt->root.score.lvl = ~ rt->root.score.lvl ;
+
+    for ( i = 0, rc = 0 ; i < Ncount && rc == 0 ; )  {
+
+        rc = err_PARENT ;
+
+        for ( rnxt = rn, j = 0 ; j < Ncount ; rnxt++, j++ )  {
+
+            if ( ! rnxt->parent )  {
+                if ( rgnloc( &rt->root, rnxt->rgn->parent ) )  {
+
+                    if ( ! ( rc = rgnadd( rt, rnxt, ri ) ) ) {
+                        i++ ;
+                        rnxt->rgn->flags = 0 ;
+                    }
+                }
+            }
+        }
+    }
+
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnadd - attach subregion to parent region
+
+    Description:
+
+        This function adds a region entry and the associated region
+        definition to the region network after validating that the
+        new region does not conflict with its parent or peers.
+
+    Returns:
+
+        0          - region network constructed
+        err_PARENT - parent region not defined
+        n > 0      - rgnadd failure completion code
+
+   ****************************************************************** */
+
+int rgnadd(
+    struct rgntree *rt,     /* region tree anchor                     */
+    struct rgntry  *rn,     /* subregion entry                        */
+    struct rgninfo *ri )    /* region error diagnostics               */
+
+{
+    int    rc = 0 ;
+    struct rgntry *parent = 0, *relate = 0 ;
+
+/* ------------------------------------------------------------------
+    validate region definition and impacts on region tree
+   ------------------------------------------------------------------ */
+
+    memset( ri, 0, RGNINFLN ) ;
+
+    if ( ! memcmp( rn->rgn->parent, rn->rgn->name, RGNAMESZ ) )
+        rc = err_LOOP ;
+
+    else if ( rc = rgnverf( rn->rgn ) )
+        ;
+
+    else if ( ! ( parent = rgnloc( &rt->root, rn->rgn->parent ) ) )
+        rc = err_PARENT ;
+
+/*  =================
+    else if ( ! ( relate = rgnloc( &rt->root, rn->rgn->relate ) ) )
+        rc = err_RELATE ;
+    =================  */
+
+    else if ( (unsigned char) ~parent->score.lvl >= MAXDEPTH )
+        rc = err_DEPTH ;
+
+    else if ( rn->rgn->wrap && rt->wrapcount )
+        rc = err_WRAP ;
+
+    else if ( rc = rgnassoc( parent, rn->rgn, assoc_ADD ) )
+        ;
+
+/* ------------------------------------------------------------------
+    add new region as subregion of parent
+   ------------------------------------------------------------------ */
+
+    if ( ! rc )  {
+
+        rt->Ncount++ ;
+
+        if ( relate == rn )
+            relate = 0 ;
+
+        rn->rgn->flags  = SRF_CHG ;
+        rn->score.lvl   = ~( ~parent->score.lvl + 1 ) ;
+        rn->score.prio  = rgnprio( rn->rgn ) ;
+        rn->relate      = relate ;
+
+        rgnpchn( parent, rn ) ;
+
+        if ( rn->flag1 & rgWRPrgn )  {
+            rt->wrapattr  = rn ;
+            rt->wrapcount = 1 ;
+        }
+    }
+
+    return rgnpost( ri, parent, relate, rn, rc ) ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnupd - update region definition
+
+    Description:
+
+        This function associates an existing region entry with a new
+        region definition after validating that the new definition
+        does not conflict with its parent or peer regions.  The
+        parent region named in the existing definition must match
+        that given in the replacement.
+
+    Returns:
+
+        0      - region network constructed
+        n > 0  - service routine failure code
+
+   ****************************************************************** */
+
+int rgnupd(
+    struct rgntree *rt,     /* region tree anchor                     */
+    struct sysrgn  *nrgn,   /* region definition replacement          */
+    struct rgninfo *ri )    /* region info node                       */
+
+{
+    int    rc = 0 ;
+    struct rgntry *rn, *parent = 0, *relate = 0 ;
+    struct rgntry pcopy ;
+
+    if ( ! ( rn = rgnloc( &rt->root, nrgn->name ) ) )
+        rc = err_NF ;
+
+    else if ( memcmp( rn->rgn->parent, nrgn->parent, RGNAMESZ ) )
+        rc = err_PARENT_REDEF ;
+
+    else if ( rt->wrapattr && rt->wrapattr != rn && nrgn->wrap )
+        rc = err_WRAP ;
+
+/*  =================
+    else if ( ! ( relate = rgnloc( &rt->root, nrgn->relate ) ) )
+        rc = err_RELATE ;
+    ================= */
+
+    else if ( rc = rgnverf( nrgn ) )
+        ;
+
+    else  {
+        if ( relate == rn )
+            relate = 0 ;
+
+        parent  = rn->parent ;
+        pcopy   = *parent ;
+        rgnassoc( &pcopy, rn->rgn, assoc_DEL ) ;
+
+        if ( ! ( rc = rgnassoc( &pcopy, nrgn, assoc_ADD ) ) )  {
+            *parent = pcopy ;
+
+            if ( ( rn->flag1 & rgWRPrgn ) && rt->wrapcount )  {
+                rt->wrapcount = 0 ;
+                rt->wrapattr  = 0 ;
+                rn->flag1    &= ~rgWRPrgn ;
+            }
+
+            rn->rgn        = nrgn ;
+            rn->rgn->flags = SRF_CHG ;
+            rn->relate     = relate ;
+            rn->score.prio = rgnprio( rn->rgn ) ;
+
+            if ( rgndchn( parent, rn ) )
+                rc = err_CHAIN ;
+
+            else  {
+                rgnpchn( parent, rn ) ;
+
+                if ( rn->flag1 & rgWRPrgn )  {
+                    rt->wrapattr  = rn ;
+                    rt->wrapcount = 1 ;
+                }
+            }
+        }
+    }
+
+    return rgnpost( ri, 0, 0, rn, rc ) ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgndel - delete region and subregions by name
+
+    Description:
+
+        This function is used to delete a designated region and all
+        associated subregions given a region name.  First, the target
+        region entry is located.  Then, rgnfree() is invoked to
+        recursively delete that region and all associated subregions.
+        All freed region entries are queued to the region tree free
+        list.  The caller is responsible for maintaining / freeing
+        these entries and the associated region definitions.  The
+        region tree header cannot be freed.
+
+    Returns:
+
+        0      - region network constructed
+        n > 0  - service routine failure code
+
+   ****************************************************************** */
+
+int rgndel(
+    struct rgntree *rt,     /* region tree anchor                     */
+    char   rnameíRGNAMESZù, /* region name                            */
+    struct rgninfo *ri )    /* region error diagnostics               */
+
+{
+    int    rc = 0 ;
+    struct rgntry *rn ;
+
+    memset( ri, 0, RGNINFLN ) ;
+
+    if ( ! ( rn = rgnloc( &rt->root, rname ) ) )
+        return ( rgnpost( ri, 0, 0, 0, err_NF ) ) ;
+
+    if ( rn->parent )
+        rc = rgnfree( rt, rn, ri ) ;
+    else
+        rc = err_NF ;
+
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnfree - free a region entry and all subregion entries
+
+   ****************************************************************** */
+
+int rgnfree(
+    struct rgntree *rt,     /* region tree anchor                     */
+    struct rgntry  *rn,     /* region entry                           */
+    struct rgninfo *ri )    /* region error diagnostics               */
+
+{
+    int    rc = 0 ;
+    struct rgntry *parent = 0, *relate = 0 ;
+
+    if ( rn->subrgn )
+        rc = rgnfree( rt, rn->subrgn, ri ) ;
+
+    if ( ! rc )  {
+        parent = rn->parent ;
+        relate = rn->relate ;
+
+        if ( rgndchn( parent, rn ) )
+            rc = err_CHAIN ;
+
+        else  {
+            rt->Ncount-- ;
+            rgnassoc( parent, rn->rgn, assoc_DEL ) ;
+            rn->rgn->flags  = SRF_DEL ;
+            rn->next        = rt->free ;
+            rt->free        = rn ;
+
+            if ( ( rn->flag1 & rgWRPrgn ) && rt->wrapcount )  {
+                rt->wrapcount = 0 ;
+                rt->wrapattr  = 0 ;
+            }
+        }
+    }
+
+    return ( rgnpost( ri, parent, relate, rn, rc ) ) ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnloc - locate region node by name
+
+    Description:
+
+        The region entry list is searched for a region entry whose
+        sysrgn name matches the one provided.
+
+    Returns:
+
+        ptr to the matching region entry or zero
+
+   ****************************************************************** */
+
+struct rgntry * rgnloc(
+    struct rgntry *rn,      /* top of region entry list               */
+    char   rnameíRGNAMESZù) /* region name                            */
+
+{
+    if ( *rname != 0 && *rname != ' ' )
+
+        for ( ; rn ; rn = rn->next )
+            if (rn->rgn && ! memcmp( rn->rgn->name, rname, RGNAMESZ ) )
+                break ;
+
+    return rn ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnwloc - identify parent region of WRAP region
+
+    Description:
+
+        This function locates the first non-repeating parent region
+        of a given region having the WRAP attribute.  This region
+        is referred to as the WRAP region owner.  If the given WRAP
+        region is not a repeating region and has no ancestors that
+        repeat, the WRAP region RGNTRY is returned.
+
+    Notes:
+
+        The wrap attribute assigned to a given region actually
+        applies to all parent regions up to and including the
+        highest level, non-repeating region as illustrated below:
+
+              PSPACE (root)
+              RGN0              <-- WRAP region owner
+              RGN1 repeating
+              RGN2
+              RGN3 repeating
+              RGN4 WRAP         <-- explicit use of WRAP attribute
+
+        The parent chain is traversed all the way to the ROOT entry,
+        if necessary, to identify the appropriate WRAP region owner.
+        In this example, assignment of the WRAP property has the same
+        affect if applied to any/all of the regions RGN0-RGN4.
+
+        The rgnWRPgrp bit is set in all regions that are subregions
+        of the WRAP region owner.  This flag is not maintained over
+        update operations to the region tree and is therefore valid
+        only in a static tree.
+
+    Returns:
+
+        ptr to WRAP region owner
+
+   ****************************************************************** */
+
+struct rgntry * rgnwloc(
+    struct rgntree *rt )    /* region tree anchor                     */
+
+{
+    struct rgntry *rn ;
+
+    rn = rt->wrapattr ;
+
+    while ( rn && ( rn->flag1 & (rgRPTrgn Ý rgRPTpar) ) )
+        rn = rn->parent ;
+
+    if ( rn )  {
+        rn->flag1 |= rgWRPgrp ;
+        rgnwmark( rn->subrgn ) ;
+    }
+
+    return rn ;
+}
+
+/* ******************************************************************
+
+    Function: rgnwmark - identify all regions in wrap group
+
+   ****************************************************************** */
+
+void rgnwmark(
+    struct rgntry *rn )
+
+{
+    for ( ; rn ; rn = rn->peer )  {
+        rn->flag1 |= rgWRPgrp ;
+        rgnwmark( rn->subrgn ) ;
+    }
+}
+
+
+/* ******************************************************************
+
+    Function: rgnverf - validate suitability of region definition
+
+   ****************************************************************** */
+
+int rgnverf( struct sysrgn *rgn )  {
+
+    int rc = 0 ;
+
+    if ( *rgn->name == 0 ÝÝ *rgn->name == ' ' )
+        rc = err_RGNNAME ;
+
+/*  =================
+    else if ( ! rgn->score.prio )
+        rc = err_SCORE ;
+    ================= */
+
+    else if ( rgn->vacuous && (rgn->Hrepeat ÝÝ rgn->Vrepeat ) )
+        rc = err_CONFLICT_ATTRS ;
+
+    else if ( !rgn->vacuous && ( !rgn->meth.len ÝÝ !rgn->meth.offset ) )
+        rc = err_METHOD ;
+
+    else if ( rgn->vacuous && ( rgn->meth.len ÝÝ rgn->meth.offset ) )
+        rc = err_METHOD ;
+
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnprio - assign materialization priority to region
+
+   ****************************************************************** */
+
+unsigned long rgnprio( struct sysrgn *rgn )  {
+
+    unsigned long prio ;
+
+    prio = rgn->score.prio ;
+
+    prio <<= 3 * 8 ;
+
+    if ( rgn->background )
+        prio <<= 1 * 8 ;
+
+    else if ( rgn->vacuous )
+        prio >>= 2 * 8 ;
+
+    else if ( rgn->Hrepeat ÝÝ rgn->Vrepeat )
+        prio >>= 1 * 8 ;
+
+    return prio ;
+}
+
+
+/* ******************************************************************
+
+    Function:  rgnassoc - update parent region for subrgn add or del
+
+    Description:
+
+        Each region entry representing a region in the region network
+        summarizes the attributes of its associated subregions. When
+        a subregion is added to or deleted from a parent region, the
+        attribute summary must be updated accordingly.  This function
+        provides two services, assoc_ADD and assoc_DEL that validate
+        the proposed relationship (ADD only) and update the attribute
+        summary accordingly.  This function is intended to segregate
+        attribute handling from the mechanics of forming and breaking
+        region linkages.
+
+        The parent rgntry is not updated if an attribute conflict is
+        detected.
+
+
+    Notes:
+
+        The following validations are applied
+
+        1) A parent region may contain at most one repeating region,
+           irregardless of whether the parent is itself a repeating
+           region.
+
+        2) A parent region may contain at most one vacuously defined
+           subregion, irregardless of whether the parent itself is
+           a vacuously defined region.
+
+        3) A parent region may not have both repeating and vacuously
+           defined (immediate) subregions.
+
+    Returns:
+
+            0   -  update complete
+        n > 0   -  error code describing subregion attribute conflict
+
+   ****************************************************************** */
+
+int rgnassoc(
+    struct rgntry *parent,      /* parent region entry                */
+    struct sysrgn *rgn,         /* candidate region definition        */
+    int reqtype )               /* assoc_ADD or assoc_DEL             */
+
+{
+    int rc = 0, rptdefs, vacdefs ;
+
+    if ( reqtype == assoc_ADD )  {
+
+        rptdefs = ( rgn->Hrepeat ÝÝ rgn->Vrepeat ) + parent->Nrptgrps ;
+
+        vacdefs = rgn->vacuous + parent->Nvacdefs ;
+
+        if ( rptdefs > 1 )
+            rc = err_REPEAT_DEF ;
+
+        else if ( vacdefs > 1 )
+            rc = err_VACUOUS_DEF ;
+
+        else if ( rptdefs + vacdefs > 1 )
+            rc = err_VAC_RPT ;
+
+        else  {
+            parent->Nsubrgns++ ;
+            parent->Nrptgrps = rptdefs ;
+            parent->Nvacdefs = vacdefs ;
+        }
+    }
+
+    else  {
+
+        parent->Nsubrgns-- ;
+
+        if ( rgn->Hrepeat ÝÝ rgn->Vrepeat )
+            parent->Nrptgrps-- ;
+
+        if ( rgn->vacuous )
+            parent->Nvacdefs-- ;
+    }
+
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgndchn - remove region from parent linkages
+
+    Notes:
+
+        rgntry.parent - ptr to parent rgntry
+        rgntry.next   - sequential list of all rgntry's by level
+        rgntry.peer   - ptr to next peer region rgntry
+        rgntry.subrgn - ptr to highest scoring subregion rgntry
+
+   ****************************************************************** */
+
+int rgndchn(
+    struct rgntry *parent,      /* parent region entry                */
+    struct rgntry *rn )         /* subregion entry                    */
+
+{
+    struct rgntry **plink, *pcurn ;
+
+/*  -----------------------------------------------------------------
+    remove subregion from parent's subregion chain
+    ----------------------------------------------------------------- */
+
+    plink = &parent->subrgn ;
+    pcurn = *plink ;
+
+    while ( (pcurn != rn) && pcurn )  {
+        plink = &pcurn->peer ;
+        pcurn = *plink ;
+    }
+
+    if ( ! pcurn )
+        return err_NF ;
+
+    *plink = pcurn->peer ;
+
+/*  -----------------------------------------------------------------
+    remove subregion from parent's next chain
+    ----------------------------------------------------------------- */
+
+    while ( parent && ( parent->next != rn ) )
+        parent = parent->next ;
+
+    if ( ! parent )
+        return err_NF ;
+
+    parent->next = rn->next ;
+    return 0 ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnpchn - attach region descriptor to parent
+
+    Notes:
+
+        rgntry.parent - ptr to parent rgntry
+        rgntry.next   - sequential list of all rgntry's by level
+        rgntry.peer   - ptr to next peer region rgntry
+        rgntry.subrgn - ptr to highest scoring subregion rgntry
+
+        propogate repeating attributes inherited from parent
+
+   ****************************************************************** */
+
+int rgnpchn(
+    struct rgntry *parent,
+    struct rgntry *rn )
+
+{
+    struct rgntry **plink, *pcurn ;
+
+    rn->parent   = parent ;
+    rn->next     = parent->next ;
+    parent->next = rn ;
+
+    rn->flag1    = 0 ;
+
+    if ( rn->rgn->Hrepeat ÝÝ rn->rgn->Vrepeat )
+        rn->flag1 Ý= rgRPTrgn ;
+
+    if ( rn->rgn->wrap )
+        rn->flag1 Ý= rgWRPrgn ;
+
+    if ( parent->flag1 & ( rgRPTrgn Ý rgRPTpar ) )
+        rn->flag1 Ý= rgRPTpar ;
+
+/* ------------------------------------------------------------------
+    add region to parent's subregion chain in priority sequence
+   ------------------------------------------------------------------ */
+
+    plink = &parent->subrgn ;
+    pcurn = *plink ;
+
+    while ( pcurn && ( rn->score.prio <= pcurn->score.prio ) )  {
+        plink = &pcurn->peer ;
+        pcurn = *plink ;
+    }
+
+    rn->peer = pcurn ;
+    *plink   = rn ;
+    return 0 ;
+}
+
+
+/* ******************************************************************
+
+    Function: rgnpost - post diagnostic info in rgninfo structure
+
+   ****************************************************************** */
+
+int rgnpost(
+    struct rgninfo *ri,     /* region error / status diagnostic block */
+    struct rgntry *parent,  /* parent region                          */
+    struct rgntry *relate,  /* related region                         */
+    struct rgntry *rn,      /* target region                          */
+    int    status )         /* status code                            */
+
+{
+    ri->parent = parent ;
+    ri->relate = relate ;
+    ri->rn       = rn ;
+    ri->rc       = status ;
+
+    return status ;
+}
+

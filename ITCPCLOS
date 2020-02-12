@@ -1,0 +1,213 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*********************************************************************/
+/* TCP/IP SuperServer default application (disconnect user)          */
+/*********************************************************************/
+/* Maintenance:                                                      */
+/*    01/23/96 Randy Witek - make ITCPACLOS the default application  */
+/*********************************************************************/
+
+/*-------------------------------------------------------------------*/
+/* Compile-time definitions                                          */
+/*-------------------------------------------------------------------*/
+
+/* none */
+
+/*-------------------------------------------------------------------*/
+/* Header Files                                                      */
+/*-------------------------------------------------------------------*/
+
+#include "tcpincl.h"
+#include "sockincl.h"
+#include "env.h"
+#include "msg.h"
+#include "stgmgr.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*-------------------------------------------------------------------*/
+/* Internal Function Prototypes                                      */
+/*-------------------------------------------------------------------*/
+
+static void logmsg
+            (
+            char                   *message,
+            int                     msgnum
+            );
+
+static void tcpenmsg
+            (
+            char                   *tcp_functionname,
+            int                     tcp_errno
+            );
+
+/*********************************************************************/
+/* Function: ITCPCLOS - Integrator SuperServer default application   */
+/*********************************************************************/
+
+void   ITCCLOS(          char     *parm_applname,
+                         long int *parm_length,
+                         char     *parm_string,
+                unsigned long int *parm_socket,
+                unsigned long int *parm_port,
+                unsigned long int *parm_hostaddr)
+
+{
+
+/*-------------------------------------------------------------------*/
+/* variable declarations                                             */
+/*-------------------------------------------------------------------*/
+
+unsigned char               dotformí16ù;
+unsigned char               msg_bufferí120ù;
+int                         s;
+int                         error_value;
+int                         namelen;
+int                         dotlen;
+struct sockaddr_in          client;
+
+/*-------------------------------------------------------------------*/
+/* BEGIN EXECUTION                                                   */
+/*-------------------------------------------------------------------*/
+
+sprintf(msg_buffer, "SuperServer ITCPCLOS: starting\n");
+logmsg(msg_buffer,901);
+
+/* Obtain the given socket descriptor                                */
+/*-------------------------------------------------------------------*/
+
+memcpy(&s,parm_socket,4);
+
+sprintf(msg_buffer, "SuperServer ITCPCLOS: socket %d will be used\n",
+   s);
+logmsg(msg_buffer,901);
+
+/* Obtain addressing family and address of client                    */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPCLOS: issuing getpeername\n",0);
+
+namelen = sizeof(client);
+
+if (getpeername(s, (struct sockaddr *)&client, &namelen) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("GETPEERNAME",error_value);
+    goto abort_socket;
+  }
+
+dotlen = sizeof(dotform);
+if (inet_ntoax(&client.sin_addr, &dotformí0ù, &dotlen) < 0)
+  {
+    error_value = 0;
+    tcpenmsg("INET_NTOAX",error_value);
+    goto abort_socket;
+  }
+
+sprintf(msg_buffer,
+   "SuperServer ITCPCLOS: client host(%s) port(%d) family(%d)\n",
+   dotform, client.sin_port, client.sin_family);
+logmsg(msg_buffer,901);
+
+/* Shutdown and close the connection to the client                   */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPCLOS: Issuing shutdown\n",0);
+
+if (shutdown(s, SOCK_SHUTDOWN_SENDRECEIVE) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("SHUTDOWN",error_value);
+    goto abort_socket;
+  }
+
+logmsg("SuperServer ITCPCLOS: issuing close\n",0);
+
+if (close(s) < 0)
+  {
+    error_value = sock_errno();
+    tcpenmsg("CLOSE",error_value);
+    goto abort_socket;
+  }
+
+/* End the SuperServer                                               */
+/*-------------------------------------------------------------------*/
+
+logmsg("SuperServer ITCPCLOS: ended normally",901);
+
+return;
+
+/* Abort the socket                                                  */
+/*-------------------------------------------------------------------*/
+
+abort_socket:
+
+logmsg("*** SuperServer ITCPCLOS: ended ABNORMALLY ***",900);
+
+return;
+
+/*-------------------------------------------------------------------*/
+/* End of main program                                               */
+/*-------------------------------------------------------------------*/
+
+}
+
+/*********************************************************************/
+/* Function: tcpenmsg                                                */
+/*********************************************************************/
+
+static void tcpenmsg(char                    *tcp_functionname,
+                     int                      tcp_errno)
+{
+   unsigned char               msg_bufferí120ù;
+   unsigned char *             error_desc;
+   int                         error_desc_length;
+   MSGH                        msg_msgh;
+
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+
+   sock_errdesc(tcp_errno, &error_desc, &error_desc_length);
+
+   sprintf(msg_buffer,
+           "ITCPCLOS function %s - %s",
+           tcp_functionname,
+           error_desc);
+
+   msg(&msg_msgh, 900, 1, msg_buffer, strlen(msg_buffer));
+
+   return;
+}
+
+/*********************************************************************/
+/* Function: logmsg                                                  */
+/*********************************************************************/
+
+static void logmsg(char                       *message,
+                   int                         msgnum)
+{
+
+   MSGH                        msg_msgh;
+   msgdft( &msg_msgh, MSGDEFAULT, "TCP", MSGDEFAULT, LOGFILE,
+           MSGDEFAULT, MSGDEFAULT, 0, MSGID, 0, 0, 0, 0, 0 ) ;
+   msg(&msg_msgh, msgnum, 1, message, strlen(message));
+   return;
+}

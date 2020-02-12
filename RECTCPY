@@ -1,0 +1,116 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "nav.h"
+#include "geometry.h"
+
+/* *****************************************************************
+
+   Function: RECTCPY - build IMAGE structure as a rectangle format
+
+   Description:
+
+     This function accepts an IMAGE and constructs a new IMAGE subset
+     structure in rectangle format from the information in the RECT
+     structure provided.  The name of the new image is the region
+     name.
+
+   ***************************************************************** */
+
+struct image* rectcpy(
+            struct stghdrq  *qh,       /* storage pool queue hdr     */
+            struct image *i,           /* IMAGE structure            */
+            struct rect  *r,           /* RECT structure             */
+            char   *rgname )           /* region name                */
+{
+
+    long   size, totlen ;
+    struct image *ri ;
+    char   *s, *t ;
+    int    rown, coln   ;
+    int    lrr, lrc, ulr, ulc, x ;
+
+
+    if ( ! ( i->format & (format_STANDARD | format_RGNRECT ) ) )
+         return 0 ;
+
+/*  ----------------------------------------------------------------
+    allocate block large enough for IMAGE block and screen rectangle
+    ---------------------------------------------------------------- */
+    lrr = r->lr.r ;
+    lrc = r->lr.c ;
+    ulr = r->ul.r ;
+    ulc = r->ul.c ;
+
+    if ( lrr > i->rows || lrc > i->cols )
+         return 0 ;
+
+    rown   = lrr - ulr + 1 ;
+    coln   = lrc - ulc + 1 ;
+    if ( rown <= 0 || coln <= 0 )
+         return 0 ;
+
+    if ( rown > i->rows || coln > i->cols )
+         return 0 ;
+
+    size = rown * coln ;
+    totlen = sizeof( struct image ) + size ;
+
+    if ( ! ( ri = stgget( qh, totlen ) ) )
+        return 0 ;
+
+
+/*  ----------------------------------------------------------------
+    modify the new image header
+    ---------------------------------------------------------------- */
+
+    memset( ri, 0, sizeof( struct image ) ) ;
+
+    s = i->buffer ;
+    t = (char *) ri + sizeof(struct image) ;
+
+    strncpy( ri->name, rgname, sizeof ri->name ) ;
+    strcpy( ri->id, "IMAGE" ) ;
+    ri->attached  = TRUE ;
+    ri->format    = format_STANDARD Ý format_RGNRECT ;
+    ri->buffer    = t ;
+    ri->buflen    = size ;
+    ri->imagesz   = size ;
+    ri->rows      = rown ;
+    ri->cols      = coln ;
+    ri->roworg    = ulr ;
+    ri->colorg    = ulc ;
+
+/*  ----------------------------------------------------------------
+    Extract region rectangle from source image
+    ---------------------------------------------------------------- */
+
+    for ( x = ulr ; x <= lrr ; x++ ) {
+        s = i->buffer + (i->cols * ( x - 1 ) ) + ulc - 1 ;
+        t = ri->buffer + ( coln * ( x - ulr ) ) ;
+        memcpy( t, s, coln ) ;
+    }
+
+    return ri ;
+}
+

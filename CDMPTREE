@@ -1,0 +1,173 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "msg.h"
+
+struct pred {
+    struct pred *p ;
+    char   type ;
+       #define BPE 'B'
+       #define CON 'C'
+    char   neg ;
+    char   rsvdí2ù ;
+    int    lvl ;
+} ;
+
+struct connector {
+    struct pred p ;
+    char   contype ;
+       #define NOT 1
+       #define AND 2
+       #define OR  3
+    char   rsvdí3ù ;
+    struct pred *right ;
+    struct pred *left  ;
+} ;
+
+struct bterm {
+    struct pred p ;
+    char   btype ;
+    unsigned char relop ;
+    short  vallen ;
+    char   *value ;
+    void   *colref ;
+    struct clex *val ;
+    struct clex *col ;
+    struct clex *opr ;
+} ;
+
+struct clex {
+    struct clex *prev ;
+    struct clex *next ;
+    int    nodelen ;
+    char   rsvxí2ù ;
+    short  lineno ;
+    short  lineoff ;
+    short  length ;
+    char   tokení32ù ;
+} ;
+
+void dumpit( struct pred *curr, int lvl, MSGH *msgh ) ;
+void fmterm( struct bterm *term, char *buffer ) ;
+void fmconn( struct connector *c, char *buffer ) ;
+
+int dmptree( struct pred *curr )  {
+
+    MSGH msgh ;
+
+    msgdft( &msgh,
+            MSGDEFAULT,
+            "SQL",
+            MSGDEFAULT,
+            0,
+            MSGDEFAULT,
+            MSGDEFAULT,
+            0,
+            MSGID,0,0,0,0,0) ;
+
+    dumpit( curr, 3, &msgh ) ;
+
+    return 0 ;
+}
+
+void dumpit( struct pred *curr, int lvl, MSGH *msgh )  {
+
+    static const char blanksíù = "                            " ;
+    struct connector *c ;
+    char   bufferí64ù ;
+
+    if ( curr->type == BPE )
+        fmterm( (struct bterm *) curr, buffer ) ;
+    else
+        fmconn( (struct connector *) curr, buffer ) ;
+
+    maddstr( *msgh, blanks, lvl ) ;
+    maddstr( *msgh, buffer, 0 ) ;
+    msg( msgh, 4, 0 ) ;
+
+    if ( curr->type == CON )  {
+
+         c = (struct connector *) curr ;
+
+         if ( c->left )
+              dumpit( (struct pred *) c->left, lvl+2, msgh ) ;
+
+         if ( c->right )
+              dumpit( (struct pred *) c->right, lvl+2, msgh ) ;
+    }
+}
+
+void fmconn( struct connector *c, char *buf )  {
+
+    *buf = 0 ;
+
+    if ( c->p.neg )
+         strcpy( buf, "(Negated) " ) ;
+
+    if ( c->contype == NOT )
+         strcat( buf, "NOT" ) ;
+
+    else if ( c->contype == AND )
+         strcat( buf, "AND" ) ;
+
+    else if ( c->contype == OR  )
+         strcat( buf, "OR" ) ;
+
+    else strcat( buf, "Conversion/result error" ) ;
+}
+
+void fmterm( struct bterm *b, char *buf )  {
+
+    unsigned char op ;
+    *buf = 0 ;
+
+    if ( b->p.neg )
+         strcpy( buf, "(Negated) " ) ;
+
+    strncat( buf, b->col->token, b->col->length ) ;
+
+    op = (b->relop & 0xe0) ;
+
+    if ( op == 0x80 )
+         strcat( buf, " = " ) ;
+
+    else if ( op == 0x60 )
+         strcat( buf, " <> " ) ;
+
+    else if ( op == 0x40 )
+         strcat( buf, " < " ) ;
+
+    else if ( op == 0x20 )
+         strcat( buf, " > " ) ;
+
+    else if ( op == 0xC0 )
+         strcat( buf, " <= " ) ;
+
+    else if ( op == 0xA0 )
+         strcat( buf, " >= " ) ;
+
+    else strcat( buf, " Conversion/result error " ) ;
+
+    strncat( buf, b->val->token, b->val->length ) ;
+}
+

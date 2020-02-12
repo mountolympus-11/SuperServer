@@ -1,0 +1,103 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module:  ICOMTCIP -  Communication request services (TCP/IP)       *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This module contains the function which host xport services    *
+*      will invoke to communicate with TCP/IP managed Xport session   *
+*      partners.  The address of the communication request routine    *
+*      is contained in the Xport profile table entry.                 *
+*                                                                     *
+*  Functions:                                                         *
+*                                                                     *
+*     comtcip - TCP/IP Communication request routine                  *
+*                                                                     *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     03/27/95 R. Colmone                                             *
+*              Initial Version                                        *
+*                                                                     *
+**********************************************************************/
+
+#include <stddef.h>
+#include "env.h"
+#include "sess.h"
+#include "sockincl.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxptcip.h"
+
+/**********************************************************************
+*                                                                     *
+*  Function:  comtcip - Communication request routine ( TCP/IP )      *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is used to invoke the appropriate TCP/IP          *
+*     service as requested by host Xport services.                    *
+*                                                                     *
+*                                                                     *
+*  Parameters: Address of PSESS (Primary session block)               *
+*              request type                                           *
+*              Address of Data area                                   *
+*              Length  of Data area                                   *
+*                                                                     *
+*  Returns:    Return Code from Communication services                *
+*                 0 - Request completed successfully                  *
+*                ~0 - Request failed                                  *
+*                                                                     *
+**********************************************************************/
+
+int comtcip( struct psess  *ps,
+             int    request,
+             void   *data,
+             int    datalen )
+{
+
+    struct xptcip *tcip ;
+
+    tcip = (struct xptcip *) ps->commblk ;
+
+    if ( request == SEND_DATA )
+
+        strcpy( tcip->tcpip_func,  "send" ) ;
+
+        if ( send( tcip->socket, data, datalen, 0 ) < 0 ) {
+            tcip->error_code = sock_errno() ;
+            return ( tcip->error_code ) ;
+        }
+
+    else if ( request == END_SESSION ) {
+
+        strcpy( tcip->tcpip_func,  "close" ) ;
+
+        close( tcip->socket ) ;
+        tcip->status |= STATUS_ENDED ;
+    }
+
+    return 0 ;
+
+}
+

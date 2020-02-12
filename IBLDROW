@@ -1,0 +1,269 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include "env.h"
+#include "convert.h"
+#include "systbls.h"
+#include "tbcoldef.h"
+#include "vars.h"
+#include "navparm.h"
+#include "bldrow.h"
+#include "attrib.h"
+
+/* ******************************************************************
+
+    Function: ibldrow - Construct VDB table row
+
+    Description:
+
+       This function will accept a navigation parameter block and
+       construct a VDB table row using the variable pool as column
+       value input.  If a column does not have an associated
+       variable in the variable pool and nulls are not allowed,
+       BLDROW fails.
+
+       Additionally, BLDROW can load the row buffer with only those
+       variables residing on the current screen(set) as indicated
+       by a non-zero input NVSTN address.  This feature can be used
+       to construct "provisional" rows used to coordinate "table
+       select" operations.
+
+   Notes:
+
+       Character, long (4 byte) integer, and 3270 attribute data
+       types are supported.
+
+
+   Entry:  Address of navparm structure
+           Address of variable pool
+           NVSTN address or zero if a complete row is requested
+
+   Return:  0 - Table row construction successful
+           >0 - Table row construction failed
+                (see header file for error reasons)
+
+   ****************************************************************** */
+
+int ibldrow(
+    struct navparm *np,              /* Navigation paramater block    */
+    void   *varpool,                 /* Variable pool address         */
+    struct nvstn   *stn )            /* Limit STN entry addr or 0     */
+{
+    struct nvcoldf  *nvc ;
+    struct svarsect *var ;
+    struct tbcoldef *tbc ;
+
+    VMLIST vml ;
+    char   *rowp, *colp, *v ;
+    int    i, coll, len, whitespace ;
+    long   val ;
+    struct field_attributes  *f ;
+
+/*  -----------------------------------------------------------------
+    Initialize row buffer
+    ----------------------------------------------------------------- */
+
+    if ( ! ( rowp = np->rowbuf ) )
+        return ERR_BUFFER ;
+
+    memset( rowp, 0, (short) np->rowbufl ) ;
+
+/*  -----------------------------------------------------------------
+    Process navparm column variables
+    ----------------------------------------------------------------- */
+
+    nvc = (struct nvcoldf *) ( (char *) np + np->poff ) ;
+
+    for ( i = 0 ; i < np->varsn ; i++ ) {
+
+        if ( ! ( nvcíiù.stat1 & ST1_SEL ) ||
+             ( stn && stn != nvcíiù.stn ) )
+        {
+            continue ;
+        }
+
+        var  = (struct svarsect *) nvcíiù.rvar ;
+        tbc  = (struct tbcoldef *) nvcíiù.cdef ;
+        colp = tbc->tbcdispl + rowp ;
+        coll = tbc->tbcleng ;
+
+        if ( tbc->tbcdtype == tbc_CHAR )
+            memset(colp, ' ', (short) coll) ;
+
+        if ( ( ! ( varget( vml, SCOPE_USER, 0, var->svarname,
+                           sizeof var->svarname, varpool ) ) ) ÝÝ
+             ( vml.vmlrsncd == RSN_NOT_FOUND ) ) {
+
+            if ( ! ( nvcíiù.stat2 & ST2_ATT )  &&
+                 ! ( nvcíiù.stat1 & ST1_NUL ) )
+            {
+                np->falv = &nvcíiù ;
+                return ERR_NULL ;
+            }
+        }
+
+/*      -------------------------------------------------------------
+        Convert embedded nulls to blanks - identify blank/null vars
+        ------------------------------------------------------------- */
+
+        else {
+            if ( ! ( nvcíiù.stat2 & ST2_ATT ) ) {
+                len = vml.vmlvarln ;
+                v   = vml.vmlvar ;
+
+                for ( whitespace = 0 ; len-- ; v++ )  {
+                    if ( ! *v )
+                        *v = ' ' ;
+
+                    if ( *v == ' ' )
+                        whitespace++ ;
+                }
+
+                if ( (nvcíiù.stat2 & ST2_NWB) &&
+                     (whitespace == vml.vmlvarln) )
+
+                    if ( ! ( nvcíiù.stat1 & ST1_NUL ) ) {
+                        np->falv = &nvcíiù ;
+                        return ERR_NULL ;
+                    }
+            }
+/*          ---------------------------------------------------------
+            Post variable data to table column slot in row buffer
+            --------------------------------------------------------- */
+
+            switch ( tbc->tbcdtype ) {
+
+                case tbc_CHAR:
+                    if ( nvcíiù.stat2 & ST2_ATT ) {
+                        f = (struct field_attributes *) colp ;
+                        if  ( ! fldatrc( vml.vmlvar, f ) )
+                            return ERR_ATT ;
+                    }
+                    else {
+                        len = min( coll, vml.vmlvarln ) ;
+                        memcpy(colp, vml.vmlvar, (short) len ) ;
+                    }
+                    break ;
+
+                case tbc_NUMBR:
+                    val = iticnvl( vml.vmlvar, vml.vmlvarln ) ;
+
+                    if ( tbc->tbcntype != tbc_INT ÝÝ
+                         coll != sizeof val ) {
+                        np->falv = &nvcíiù ;
+                        return ERR_NUM ;
+                    }
+
+                    *( (long *) colp ) = val ;
+                    break ;
+
+                default:
+                    np->falv = &nvcíiù ;
+                    return ERR_DTYPE ;
+
+            }
+        }
+    }
+
+    return 0 ;
+
+}
+
+/* ******************************************************************
+
+    Function: fldatrc - Build field_attributes datatype structure
+
+    Description:
+
+      This routine accepts a 3270 field attribute byte represented
+      in "host internal format" and generates the corresponding
+      field_attributes datatype representation in a return area
+      provided by the caller.
+
+    Accepts:
+
+      A pointer to a  3270 attribute byte in internal format
+      A pointer to a field_attributes construction area (CL8)
+
+    Returns:
+
+      TRUE  - conversion complete
+      FALSE - invalid 3270 attribute byte provided
+
+   ****************************************************************** */
+
+int fldatrc(
+    unsigned char *attrbyte,      /* attr byte, host internal format  */
+    struct field_attributes *f )  /* ATTRIBUTES datatype return area  */
+{
+
+    unsigned char attr = *attrbyte ;
+
+    if ( attr < ATTR_RANGE_START || attr > ATTR_RANGE_END )
+        return FALSE ;
+
+    memset( f, FA_UNKNOWN, sizeof( struct field_attributes ) ) ;
+
+/* ------------------------------------------------------------------
+    Protected / unprotected
+   ------------------------------------------------------------------ */
+
+    if ( attr & ATTR_PROTECT )
+        f->prot_attr = FA_PROTECTED ;
+    else
+        f->prot_attr = FA_UNPROTECTED ;
+
+/* ------------------------------------------------------------------
+    Intensity
+   ------------------------------------------------------------------ */
+
+    if ( attr & ATTR_HIGH )
+        f->intensity_attr = FA_HIGH ;
+    else if ( attr & ATTR_NORMAL_PEN )
+        f->intensity_attr = FA_NORMAL_PEN ;
+    else
+        f->intensity_attr = FA_NORMAL ;
+
+    if ( (attr & ATTR_HIGH) && (attr & ATTR_NORMAL_PEN) )
+        f->intensity_attr = FA_DARK ;
+
+
+/* ------------------------------------------------------------------
+    Data entry type
+   ------------------------------------------------------------------ */
+
+    if ( attr & ATTR_NUMERIC )
+        f->type_attr = FA_NUMERIC ;
+    else
+        f->type_attr = FA_ALPHA ;
+
+/* ------------------------------------------------------------------
+    Modified data tag
+   ------------------------------------------------------------------ */
+
+    if ( attr & ATTR_MDT )
+        f->modify_attr = FA_MODIFIED ;
+    else
+        f->modify_attr = FA_UNMODIFIED ;
+
+    return TRUE ;
+}
+

@@ -1,0 +1,111 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module: FLTCPIC - Host Xport Filter / Request Rtns (CPI-C)         *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This module contains functions specific to the CPI-C (LU6.2)    *
+*     implementation of Host Xport facility.  These functions are     *
+*     indentified to XPORT via the associated Xport profile table     *
+*     Entry.  Filter routines may be used to massage the data         *
+*     before and after xport processing.  The Request selector        *
+*     routines are called to determine the type of xport request      *
+*     from the CPI-C data structures.                                 *
+*                                                                     *
+*  External Functions:                                                *
+*                                                                     *
+*     reqcpic - Select request type from CPI-C request                *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/12/94  R. Colmone              Par# 134222                   *
+*               Initial Version                                       *
+*                                                                     *
+**********************************************************************/
+
+#include <stddef.h>
+#include "env.h"
+#include "cmincl.h"
+#include "hxpprof.h"
+#include "hxpcpic.h"
+
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Function:  reqcpic - Select request type from CPI-C request        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will determine the request type from the CPI-C    *
+*     Communication area block.  The selected request type is then    *
+*     used to lookup the Xport request type in the Xport profile      *
+*     table Request/Reply formats for the associated Profile table    *
+*     entry.                                                          *
+*                                                                     *
+*  Parameters:                                                        *
+*                                                                     *
+*     Address of request structure                                    *
+*     Address of commblk                                              *
+*                                                                     *
+*  Return:  ZERO - All conditions                                     *
+*                                                                     *
+**<DOC-OFF>***********************************************************/
+
+int reqcpic( struct request *req, void *commblk ) {
+
+    struct xpcpic *cpic ;
+
+    cpic = (struct xpcpic *) commblk ;
+
+    if ( cpic->cstatus & STATUS_HXPREQ ) {
+        req->method   =  FUNCTION ;
+        cpic->cstatus &= ~STATUS_HXPREQ ;
+    }
+    else {
+
+        switch ( cpic->statusreceived ) {
+
+            case CM_SEND_RECEIVED :
+                req->method  = CPIC ;
+                req->methval = SNDRECVD ;
+                break ;
+
+            case CM_CONFIRM_DEALLOC_RECEIVED :
+                req->method  = CPIC ;
+                req->methval = DEALLOC ;
+                break ;
+
+            default :
+
+                if ( cpic->rtsreceived == CM_REQ_TO_SEND_RECEIVED ) {
+                    req->method  = CPIC ;
+                    req->methval = REQTOSND ;
+                }
+         }
+    }
+
+    cpic->statusreceived   = 0 ;
+    cpic->datareceivedtype = 0 ;
+
+    return 0 ;
+
+}

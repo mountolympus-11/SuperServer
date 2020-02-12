@@ -1,0 +1,600 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*
+** Code-generation-control #defines follow (comment out to suppress
+** generation):
+*/
+
+/*#define GenSnapKeyTable              /* gen snap key table code     */
+/*#define GenSnapOpTable               /* gen snap op table code      */
+/*#define GenSnapKeyEntry              /* gen snap key entry code     */
+/*#define GenSnapOpEntry               /* gen snap op entry code      */
+
+#include "env.h"                       /* environment                 */
+#include "stgmgr.h"                    /* storage management servcies */
+#include "rcb.h"                       /* report control block        */
+#include "msg.h"                       /* message services            */
+#include "mrd.h"                       /* message RPT device          */
+#include "koi.h"                       /* keyword operand inversion   */
+#include "cmdreq.h"                    /* command request             */
+#include "ccsumry.h"                   /* command content summary     */
+
+/*--------------------------------------------------------------------*/
+
+/* keyword id - must match MACLIB(KEYCODES) equ value */
+#define PARMCMD_DISPLAY 1              /* maintain to match keycodes  */
+
+void ParmCmd(                          /* process parm command        */
+  tKhd *,                              /* i/ - keyword table header   */
+  void *,                              /* i/ - operand post table     */
+  void *,                              /* i/  - ICVT                  */
+  tCrq *                               /* i/  - command request block */
+  );
+
+/*
+** Local types.
+*/
+
+typedef char tPdf;                     /* parm display control flags  */
+#define PdfNull         0x00
+#define PdfSnapKeyTable 0x80
+#define PdfSnapKeyEntry 0x40
+#define PdfSnapOpTable  0x20
+#define PdfSnapOpEntry  0x10
+#define PdfSnapAll  \
+  (PdfSnapKeyTable  \
+  | PdfSnapKeyEntry \
+  | PdfSnapOpTable  \
+  | PdfSnapOpEntry)
+
+typedef struct sPxp                    /* ParmKeywordExit parm        */
+  {
+  void *           Osb;                /* operand source blk base addr*/
+  tRcb *           Rcb;                /* report control block        */
+  tPdf             Pdf;
+  } tPxp;
+
+/*
+** Local routines.
+*/
+
+static tKoxRc ParmKeywordExit(         /* inversion exit routine      */
+  tPxp *,                              /* i/  - passthrough parm list */
+  tKvc *                               /* i/  - parm list from KOI    */
+  );
+
+static void GetKeyOperandString(       /* op. value to string         */
+  struct keytab *,                     /* i/  - keyword table entry   */
+  struct postops *,                    /* i/  - operand table entry   */
+  void *,                              /* i/  - operand source base   */
+  char *                               /*  /o - string-ized op. value */
+  );
+
+static void strip(                     /* strip trailing characters   */
+  char *,                              /* i/o - string to strip       */
+  char                                 /* i/ - character to strip     */
+  );
+
+/*
+** Local macros
+*/
+
+#define ClearHighBit(A) ((void *)(((int)(A)) & 0x7fffffff))
+
+#define IfNotZero(A,B,operation) \
+  if ((A = B) != 0)           \
+    {                         \
+    operation;                \
+    }
+
+#define IfNull(A,B,operation) \
+  if ((A = B) == NULLP)       \
+    {                         \
+    operation;                \
+    }
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Process PARM console command                                       */
+/*                                                                    */
+/* Syntax: PARM íDISPLAYù                                             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+void ParmCmd(                          /* process parm command        */
+  tKhd *           Khd,                /* i/ - keyword table header   */
+  void *           Ops,                /* i/ - operand post table     */
+  void *           Icvt,               /* i/  - ICVT                  */
+  tCrq *           Crq                 /* i/  - command request block */
+  )
+
+{
+
+  int (*           stgallc)();         /* storage allocator           */
+  int (*           stgfree)();         /* storage releasor            */
+  tCcs *           Ccs;                /* command content summary     */
+  struct stghdrq   StgQ;               /* storage queue               */
+  tRdr             Rdr;                /* report device routines      */
+  tMop             Mop;                /* message device options      */
+  tPxp             Pxp;                /* ParmKeywordExit parm        */
+  tRptRc           RptRc;              /* report services rc          */
+  tKoiRc           KoiRc;              /* keyword/operand inversion rc*/
+
+static const char  Componentíù = "CMD";
+
+static const tMop  MopInit =           /* initial $MSG device options */
+    {
+    NULLP,
+    NULLP,
+    NULLP,
+    LOGFILE,
+    0,
+    MSGID,
+    0,
+    NULLP,
+    NULLP,
+    NULLP,
+    NULLP,
+    0,
+    0x00
+    };
+
+static const char  RptOptionsíù =      /* report services options     */
+    "NOHDR NOSPC NOGRP";
+
+  Ccs = Crq->Summary.Address;          /* command summary             */
+
+/*
+** Identify/analyze command's operands.
+** NOTE: currently, only DISPLAY is supported.
+*/
+
+  if ((Ccs != NULLP)                   /* command summary ...         */
+    && (Crq->CmdEntries != 0))         /* ... and operands ?          */
+    {
+    if (Crq->CmdEntries > 1)           /* more than can be expected ? */
+      {
+      Crq->CompCode = CCODE_SYNTAX;    /* yes, syntax error           */
+      return;                          /* EXIT                        */
+      }
+
+    switch(Ccs->Id)                    /* keyword id dependent        */
+      {
+      case PARMCMD_DISPLAY:
+        if (Ccs->ValueCount > 0)       /* more than can be expected ? */
+          {
+          Crq->CompCode = CCODE_SYNTAX;/* yes, syntax error           */
+          return;                      /* EXIT                        */
+          }
+        break;
+
+      default:
+        Crq->CompCode = CCODE_SYNTAX;  /* yes, syntax error           */
+        return;                        /* EXIT                        */
+      } /* switch(Ccs->Id) */
+    } /* if ((Ccs ... */
+
+/*
+** Establish report device ($MSG to LOGFILE) control parameters.
+*/
+
+  memcpy(&Mop, &MopInit, sizeof(tMop));
+  Mop.Component = (char *)&Component;
+  Mop.ConsoleId = Crq->ConsoleId;
+  Mop.DestAux = Crq->Mask;
+  Mop.MCSConsole = Crq->ConsoleName;
+  Mop.MCSResponse = Crq->RespToken;
+  Mop.MsgQAnchor = Crq->MsgQ;
+  Mop.MsgStgQ = Crq->StgQ;
+  Mop.MsgNumber = 430;                 /* display-parm-settings msg # */
+
+  Rdr.Open = (tRptRc (*)(struct sRcb *, void *))RptMsgOpen;
+  Rdr.Write = RptMsgWrite;
+  Rdr.Close = RptMsgClose;
+
+/*
+** Intialize storage queue.
+*/
+
+  stgallc = (int (*)())getfunc("XALOC31");
+  stgfree = (int (*)())getfunc("XFREE");
+
+  stginit(                             /* initialize storage queue    */
+    &StgQ,                             /* i/o - storage queue         */
+    4096,                              /* i/  - block size            */
+    stgallc,                           /* i/  - allocation routine    */
+    stgfree,                           /* i/  - release routine       */
+    0                                  /* i/  - lock routine          */
+    );
+/* should check that stginit is ok */
+
+/*
+** Open report services to $MSG device.
+*/
+
+  IfNull(Pxp.Rcb,                      /*  /o - report control block  */
+    RptOpen(                           /* open report                 */
+    &StgQ,                             /* i/o - storage queue         */
+    &Rdr,                              /* i/  - report device routines*/
+    &Mop,                              /* i/  - device data           */
+    (char *)&RptOptions,               /* i/  - format options        */
+    &RptRc                             /* i/o - return code area      */
+    ),
+    goto ErrOpen);
+
+/*
+** Initialize keyword-operand-inversion exit parm.
+*/
+
+  Pxp.Pdf = PdfNull;
+/*Pxp.Pdf = PdfSnapAll; */
+  Pxp.Osb = Icvt;
+
+/*
+** Process parm command.
+*/
+
+#ifdef GenSnapKeyTable
+  if ((Pxp.Pdf & PdfSnapKeyTable) != 0)
+    {
+    RptRc = RptSnap(Pxp.Rcb, "Snap of key table:",
+      (int)ClearHighBit((*(int *)((char *)Khd + 4*2)) - (int)Khd),
+      Khd);
+    }
+#endif
+
+#ifdef GenSnapOpTable
+  if ((Pxp.Pdf & PdfSnapOpTable) != 0)
+    {
+    RptRc = RptSnap(Pxp.Rcb, "Partial snap of ops table:",
+      100,
+      Ops);
+    }
+#endif
+
+  KoiRc = KeywordOperandInversion(     /* de-compile keyword values   */
+    (tKoiExit)ParmKeywordExit,         /* i/  - keyword exit routine  */
+    &Pxp,                              /* i/  - exit routine parm     */
+    Khd->First,                        /* i/  - first entry in table  */
+    (struct postops *)Ops              /* i/  - operand table         */
+    );
+
+  if (KoiRc != KoiOK)                  /* decompiled ok ?             */
+    {
+    RptRc = RptWrite(Pxp.Rcb,          /* no, error                   */
+      "Keyword Operand Inversion error, rc = %d", KoiRc);
+    }
+
+ErrOpen:
+  if (Pxp.Rcb != NULLP)                /* report open ?               */
+    {
+    RptClose(Pxp.Rcb);                 /* yes, close report           */
+    }
+
+  stgterm(&StgQ);                      /* free all storage            */
+
+  Crq->CompCode = CCODE_STDCOMP;       /* standard completion         */
+
+  return;
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* ParmKeywordExit is invoked as an exit from the Keyword/Operand     */
+/* Inversion routine for each keyword and its associated operand      */
+/* value(s).  Its purpose is to display (write) the keyword and its   */
+/* associated operand value list if any.                              */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+static tKoxRc ParmKeywordExit(         /* inversion exit routine      */
+  tPxp *           Pxp,                /* i/  - passthrough parm list */
+  tKvc *           Kvc                 /* i/  - parm list from KOI    */
+  )
+
+{
+
+typedef char tLsf;                     /* local status flag           */
+#define LsfNull         0x00           /* null                        */
+#define LsfWriteKeyword 0x80           /* write keyword               */
+#define LsfOperands     0x40           /* write operands              */
+
+  struct postops * OpcEntry;           /* current operand entry       */
+  int              Count;              /* count of keyword's operands */
+  tBlkRc           BlkRc;              /* stg service return code     */
+  tRptRc           RptRc;              /* rpt service return code     */
+  char             OpValueStringí256ù; /* string-ized op. value entry */
+
+  char             OpListí256ù = "";   /* keyword's op. value list    */
+  tLsf             LsfFlag = LsfNull;  /* status flag                 */
+
+/*
+** Ignore keyword synonyms.
+*/
+
+  if (Kvc->Kte->refer != NULLP)        /* keyword synonym ?           */
+    {
+    return(KoxOK);                     /* yes, ignore it              */
+    }
+
+/*
+** Snap keyword table entry.
+*/
+
+#ifdef GenSnapKeyEntry
+  if ((Pxp->Pdf & PdfSnapKeyEntry) != 0)
+    {
+    RptSnap(Pxp->Rcb, "Snap of keyword table entry:",
+      sizeof(struct keytab),
+      Kvc->Kte
+      );
+    }
+#endif
+
+/*
+** Process operand value entries associated with keyword table entry.
+*/
+
+  for(Count = BlkEntries(Kvc->Bcb);
+    Count > 0;
+    Count--)
+    {
+
+    BlkRc = BlkGet(Kvc->Bcb, &OpcEntry);
+
+    if (BlkRc != 0)
+      {
+      RptWrite(Pxp->Rcb, "BlkGet error, BlkRc = %d", BlkRc);
+      return(KoxError);
+      }
+
+#ifdef GenSnapOpEntry
+    if ((Pxp->Pdf & PdfSnapOpEntry) != 0)
+      {
+      RptSnap(Pxp->Rcb, "Snap of operand entry:",
+        sizeof(struct postops),
+        OpcEntry
+        );
+      }
+#endif
+
+    GetKeyOperandString(               /* convert operand value to str*/
+      Kvc->Kte,                        /* i/  - key table entry       */
+      OpcEntry,                        /* i/  - operand table entry   */
+      Pxp->Osb,                        /* i/  - source base address   */
+      OpValueString                    /*  /o - stringized op value   */
+      );
+
+    if (OpcEntry->valno == 0)          /* keyword w/optional values...*/
+      {
+      if (strlen(OpValueString) > 0)   /* ... and specified ?         */
+        {
+        LsfFlag |= LsfWriteKeyword;    /* yes, remember to write it   */
+        }
+      } /* if ((Kvc->Kte... */
+    else
+      {
+      LsfFlag |= LsfWriteKeyword;      /* remember to write keyword   */
+
+      if (strlen(OpValueString) > 0)   /* operand extracted ?         */
+        {
+        if ((LsfFlag & LsfOperands) != 0) /* prior operand extracted ?*/
+          {
+          strcat(OpList, ",");         /* yes, delimit prior from cur.*/
+          }
+        LsfFlag |= LsfOperands;        /* remember operand(s) exist   */
+        strcat(OpList, OpValueString); /* augment operand value   list*/
+        } /* if (strlen... */
+      } /* else if ((Kvc->Kte... */
+    } /* for(; */
+
+/*
+** Write keyword with operand values.
+*/
+
+  if ((LsfFlag & LsfWriteKeyword) != 0)
+    {
+    RptRc = RptWrite(Pxp->Rcb,
+      "%-.*s%s%s%s",
+      (int)Kvc->Kte->keylen,
+      Kvc->Kte->keyword,
+      (((LsfFlag & LsfOperands) != 0) ? "(" : ""),
+      OpList,
+      (((LsfFlag & LsfOperands) != 0) ? ")" : "")
+      );
+    }
+
+  return(KoxOK);
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Extract keyword's operand value and return a string-ized version   */
+/* of it.                                                             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+static void GetKeyOperandString(       /* op. value to string         */
+  struct keytab *  Kte,                /* i/  - keyword table entry   */
+  struct postops * Opc,                /* i/  - operand table entry   */
+  void *           Osb,                /* i/  - operand source base   */
+  char *           OperandString       /*  /o - string-ized op. value */
+  )
+
+{
+
+  void *           SourceField;        /* operand source field        */
+  unsigned long    IntValue;           /* integer work                */
+  char             Bits;               /* bit work                    */
+
+  strcpy(OperandString, "");           /* initialize result           */
+  SourceField = (char *)Osb + Opc->displ;
+
+/*
+** Handle bit oriented operands first.
+*/
+
+  if (Opc->valno == 0)                 /* bit mask operand ?          */
+    {
+    Bits = *(char *)SourceField & Opc->mask; /* yes, isolate mask bits*/
+
+    if ((Opc->opt) > 0)                /* SET > 0, RESET < 0. SET ?   */
+      {
+      if (Bits == Opc->mask)           /* yes, mask bits ALL on ?     */
+        {
+        sprintf(OperandString, "%-.*s", /* yes, keyword specified     */
+          (int)Kte->keylen,
+          Kte->keyword
+          );
+        }
+      } /* if ((Opc->opt... */
+    else
+      {
+      if (Bits == 0)                   /* mask bits ALL off ?         */
+        {
+        sprintf(OperandString, "%-.*s", /* yes, keyword specified     */
+          (int)Kte->keylen,
+          Kte->keyword
+          );
+        }
+      } /* else if ((Opc->opt... */
+
+    return;
+
+    } /* if (Opc->valno... */
+
+/*
+** Handle all other operand types based on keyword data type.
+*/
+
+  switch(Kte->datatype)                /* keyword datatype dependent  */
+    {
+
+    case ALPHA:
+    case LABEL:
+    case NOTYPE:
+      sprintf(OperandString,"%-.*s", (int)Opc->length, SourceField);
+      break; /* case */
+
+    case NUMERIC:
+      IntValue = 0;
+      switch(Opc->length)
+        {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+          memcpy((char *)&IntValue + (4 - Opc->length),
+            SourceField,
+            (int)Opc->length);
+          sprintf(OperandString,"%d", IntValue);
+          break;
+
+        default:
+          sprintf(OperandString,"<unsupported-numeric length %d>",
+            (int)Opc->length);
+          break;
+        } /* switch(Opc->length) */
+
+      break; /* case */
+
+    case SIZE:
+      IntValue = 0;
+      switch(Opc->length)
+        {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+          memcpy((char *)&IntValue + (4 - Opc->length),
+            SourceField,
+            (int)((int)Opc->length));
+          break;
+
+        default:
+          /* unsupported, value will display as zero */
+          break;
+        } /* switch(Opc->length) */
+
+      switch(Kte->dataqual)
+        {
+        case '\0':
+        case 'B':
+          sprintf(OperandString, "%d", (IntValue));
+          break; /* case */
+
+        case 'K':
+          sprintf(OperandString, "%dK", (IntValue / 1024));
+          break; /* case */
+
+        case 'M':
+          sprintf(OperandString, "%dK", (IntValue / (1024*1024)));
+          break; /* case */
+
+        default:
+          sprintf(OperandString,"<unsupported data qualifier 0x%01X>",
+            Kte->dataqual);
+          break; /* case */
+
+        } /* switch(Kte->dataqual) */
+      break; /* case SIZE */
+
+    case HEX:
+    default:
+      sprintf(OperandString,"<unsupported datatype 0x%01X>",
+        Kte->datatype);
+      break; /* case HEX: & default */
+
+    } /* switch */
+
+  strip(OperandString, ' ');           /* remove trailing blanks      */
+
+  return;
+
+}
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Strip trailing occurences of a character from a string.            */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+static void strip(
+  char *           String,             /* i/o - string to strip       */
+  char             StripChar           /* i/  - char to strip         */
+  )
+
+{
+
+  char *           Temp;
+
+  for (Temp = String + strlen(String) - 1;
+    (Temp > String) && (*Temp == StripChar);
+    Temp--)
+    {
+    ;
+    }
+
+  *(Temp + 1) = '\0';
+
+  return;
+
+}

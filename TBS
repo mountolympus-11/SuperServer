@@ -1,0 +1,327 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#define NULLP ((void *) 0)
+
+#include <stddef.h>
+#include <string.h>
+
+#include "env.h"
+#include "stgmgr.h"
+#include "tkn.h"
+#include "tbs.h"
+
+/*--------------------------------------------------------------------*/
+
+tTbs * TbsOpen(                        /* open table                  */
+  struct stghdrq * StgQ,               /* i/  - storage anchor        */
+  tTkn *           SpaceToken,         /* i/  - space token           */
+  tTableName *     TableName,          /* i/  - table name to open    */
+  tTbsRc *         Rc                  /*  /o - return code           */
+  )
+
+{
+
+  tTbs *           Tbs;                /* table service block         */
+  void *           TableToken;         /* table token                 */
+  tTbd             Tbd;                /* diagnostics                 */
+
+  /*
+  ** Open the table.
+  */
+
+  if ((*Rc = TbOpen(SpaceToken, &TableToken, TableName, &Tbd)) != 0)
+    {
+    *Rc = TbsErrorTbopen;              /* open error                  */
+    return(NULLP);
+    }
+
+  /*
+  ** Allocate TBS
+  */
+
+  if ((Tbs = stgget(StgQ, sizeof(tTbs))) == NULLP)
+    {
+    *Rc = TbsErrorStgget;              /* allocation error            */
+    return(NULLP);
+    }
+
+  /*
+  ** Allocate row retrieval work buffer
+  */
+
+  Tbs->RowSize = TbsRowSize;
+
+  if ((Tbs->Row = stgget(StgQ, Tbs->RowSize)) == NULLP)
+    {
+    stgretn(StgQ, sizeof(tTbs), Tbs);
+    *Rc = TbsErrorStgget;              /* allocation error            */
+    return(NULLP);
+    }
+
+  /*
+  ** Complete TBS population
+  */
+
+  memcpy(Tbs->Eyecatch, TbsEyecatch, sizeof(tTbsEyecatch));
+  Tbs->StgQ = StgQ;
+  memcpy(Tbs->TableName, TableName, sizeof(tTableName));
+  Tbs->TableToken = TableToken;
+  Tbs->Space = SpaceToken;
+  Tbs->Sarg = NULLP;
+  Tbs->SargSize = TbsSargSize;
+  memset(&Tbs->Tbd, 0, sizeof(tTbd));
+
+  return(Tbs);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* retrieve a row from the TBS associated table                       */
+/*--------------------------------------------------------------------*/
+
+tTbsRc TbsGet(                         /* retrieve table data         */
+  tTbs *           Tbs,                /* i/  - table service block   */
+  tTps             Tps,                /* i/  - row retrieval parm    */
+  tTgc             Tgc,                /* i/  - table-get control     */
+  tIndexName *     Index,              /* i/  - index name or NULLP   */
+  void *           Nma,                /* i/  - NULLs mask return area*/
+  void **          Row                 /*  /o - addr. of data         */
+  )
+
+{
+
+  int              Rc;                 /* return code                 */
+  tTsa *           Sargs = NULLP;      /* table search argument       */
+
+  if ((Tgc & TgcSarg) != 0)            /* get using search arg. ?     */
+    {
+    Sargs = (tTsa *)Tbs->Sarg;         /* yes, set it                 */
+    }
+
+  while(1)
+    {
+    Rc = TbGet(
+      &Tbs->TableToken,
+      Tbs->Row,
+      Tbs->RowSize,
+      Index,
+      Tps,
+      Sargs,
+      Nma,
+      &Tbs->Tbd
+      );
+    switch (Rc)
+      {
+      case TbgOk:
+        *Row = Tbs->Row;
+        return(TbsOk);
+
+      case TbgEot:
+        return(TbsEndOfTable);
+
+      case TbgNoSpace:
+        {
+        if (stgretn(Tbs->StgQ, Tbs->RowSize, Tbs->Row) != 0)
+          {
+          return(TbsErrorStgretn);
+          }
+        Tbs->RowSize += Tbs->RowSize;
+        if ((Tbs->Row = stgget(Tbs->StgQ, Tbs->RowSize)) == NULLP)
+          {
+          return(TbsErrorStgget);
+          }
+        }
+        break;
+
+      default:
+        return(TbsErrorTbget);
+
+      } /* switch(Rc) */
+    } /* while(1) */
+
+}
+
+/*--------------------------------------------------------------------*/
+/* close TBS associated table, and release all TBS owned storage      */
+/*--------------------------------------------------------------------*/
+
+tTbsRc TbsClose(                       /* close table                 */
+  tTbs *           Tbs                 /* i/  - table service block   */
+  )
+
+{
+
+  struct stghdrq * StgQ;
+  tTbd             Tbd;
+
+  if (Tbs == NULLP)
+    {
+    return(0);
+    }
+
+  StgQ = Tbs->StgQ;
+
+  if ((TbClose(&Tbs->TableToken, &Tbd) != 0)
+    || ((Tbs->Sarg != NULLP)
+       && (stgretn(StgQ, Tbs->SargSize, Tbs->Sarg) != 0))
+    || ((Tbs->Row != NULLP)
+       && (stgretn(StgQ, Tbs->RowSize, Tbs->Row) != 0))
+    || (stgretn(StgQ, sizeof(tTbs), Tbs) != 0))
+    {
+    return(TbsErrorClose);
+    }
+
+  return(0);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* initialize/clear table search argument                             */
+/*--------------------------------------------------------------------*/
+
+tTbsRc TbsSargInit(                    /* initialize search argument  */
+  tTbs *           Tbs,                /* i/  - table service block   */
+  tTsc             Connector           /* i/  - inter-entry connector */
+  )
+
+{
+
+  static const tTsa InitTsa = mInitTsa(TscNull);
+
+  if (Tbs->Sarg == NULLP)              /* sarg buffer exist ?         */
+    {
+    Tbs->SargSize = TbsSargSize;       /* no, allocate it. default sz.*/
+    if ((Tbs->Sarg = stgget(Tbs->StgQ, Tbs->SargSize)) == NULLP)
+      {
+      return(TbsErrorStgget);
+      }
+    }
+
+  memset(Tbs->Sarg, 0, Tbs->SargSize);
+  memcpy(Tbs->Sarg, &InitTsa, sizeof(InitTsa));
+  ((tTsa *)Tbs->Sarg)->Connector = Connector;
+
+  return(TbsOk);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* add a table search argument                                        */
+/*--------------------------------------------------------------------*/
+
+TbsSargAdd(                            /* add a table search argument */
+  tTbs *           Tbs,                /* i/  - table service block   */
+  tColumnName *    ColumnName,         /* i/  - search-column name    */
+  tTsr             Relation,           /* i/  - search relation       */
+  void *           Value,              /* i/  - search value          */
+  int              ValueLength         /* i/  - search value's length */
+  )
+
+{
+
+  char *           NewSarg;
+
+  if (Tbs->Sarg == NULLP)              /* sarg initialization done ?  */
+    {
+    return(TbsErrorSarg);              /* no, error                   */
+    }
+
+  /*
+  ** If not enough space to add the argument, reallocate, copy old to
+  ** new, free old and recurse to add the argument.
+  */
+
+  if ((((tTsa *)Tbs->Sarg)->Length + sizeof(tTse) + ValueLength)
+    > Tbs->SargSize)
+    {
+    if ((NewSarg = stgget(Tbs->StgQ, Tbs->SargSize * 2)) == NULLP)
+      {
+      return(TbsErrorStgget);
+      }
+
+    memcpy(NewSarg, Tbs->Sarg, Tbs->SargSize);
+
+    if (stgretn(Tbs->StgQ, Tbs->SargSize, Tbs->Sarg) != 0)
+      {
+      stgretn(Tbs->StgQ, Tbs->SargSize*2, NewSarg);
+      return(TbsErrorStgretn);
+      }
+
+    Tbs->Sarg = NewSarg;
+    Tbs->SargSize *=2;
+
+    return(TbsSargAdd(Tbs, ColumnName, Relation, Value, ValueLength));
+
+    } /* if ((((tTsa *)Tbs->Sarg)->Length ... */
+
+  /*
+  ** Add the search argument.
+  */
+
+  ((tTse *)(Tbs->Sarg + ((tTsa *)Tbs->Sarg)->Length))->Relation
+    = Relation;
+
+  memcpy(
+    ((tTse *)(Tbs->Sarg + ((tTsa *)Tbs->Sarg)->Length))->Column,
+    ColumnName,
+    sizeof(tColumnName)
+    );
+
+  memcpy(
+    ((tTse *)(Tbs->Sarg + ((tTsa *)Tbs->Sarg)->Length))->Value,
+    Value,
+    ValueLength
+    );
+
+  ((tTsa *)Tbs->Sarg)->Entries++;
+  ((tTsa *)Tbs->Sarg)->Length += sizeof(tTse) + ValueLength;
+
+  return(TbsOk);
+
+}
+
+/*--------------------------------------------------------------------*/
+
+/*--------------------------------------------------------------------*/
+/* set position for the TBS associated table                          */
+/*--------------------------------------------------------------------*/
+
+tTbsRc TbsSet(                         /* retrieve table data         */
+  tTbs *           Tbs,                /* i/  - table service block   */
+  tTss             Tss,                /* i/  - row retrieval parm    */
+  tIndexName *     Index               /* i/  - index name or NULLP   */
+  )
+
+{
+
+  int              Rc;                 /* return code                 */
+
+  Rc = TbSet(
+    &Tbs->TableToken,
+    Tss,
+    Index,
+    &Tbs->Tbd
+    );
+
+  if (Rc != 0)
+    {
+    return(TbsErrorTbset);
+    }
+
+}

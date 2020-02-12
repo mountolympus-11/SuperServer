@@ -1,0 +1,355 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "nav.h"
+#include "env.h"
+#include "stgmgr.h"                    /* storage manager             */
+#include "msg.h"
+#include "navcap.h"
+
+/********************************************************************
+
+    Parameter Block Definitions
+
+  ********************************************************************/
+
+struct dumpparms {
+    int    detail ;
+    int    linelen ;
+    struct MSGBUF  **anchor ;
+    struct stghdrq *qh ;
+    char   *bufr       ;
+} ;
+
+struct treeparms {
+    int    lvl ;                        /* parms used for navdump  */
+    MSGH   *msgh ;
+    struct dumpparms *dp ;
+
+    char   flag ;
+        #define  SUP_ARC       0x01
+        #define  PEER_ARC      0x02
+        #define  SUP_PEER      0x03
+        #define  SUB_ARC       0x04
+
+    char   termstate ;                  /* set TRUE if the plan path
+                                           ends in a caller-identified
+                                           terminal state and FALSE
+                                           otherwise                  */
+
+} ;
+
+
+/* ******************************************************************
+
+    Function prototypes
+   ****************************************************************** */
+
+void navtree (
+     struct suprarc *curr,
+     struct treeparms *tp ) ;
+
+void printit (
+     void *curr,
+     struct treeparms *tp ) ;
+
+void fmtscrn( char flag, void *p, char *buffer ) ;
+
+int trimx( char *org, int len, char *dest ) ;
+
+
+/* ******************************************************************
+
+
+
+   ****************************************************************** */
+
+int navdump(
+    struct aappl   *appl,
+    struct plan    *pln,
+    int    totalcost,
+    MSGBUF **anchor,
+    char   *label,
+    int    detail,
+    int    linelen,
+    int    dests,
+    struct stghdrq *qh )
+{
+
+    MSGH   msgh ;
+    struct dumpparms dp ;
+    struct treeparms tp ;
+    struct suprarc   *first ;
+    char   bufrí256ù    ;
+
+    dp.detail  = detail ;
+    dp.linelen = linelen ;
+    dp.anchor  = anchor ;
+    dp.qh      = qh ;
+    dp.bufr    = bufr ;
+
+    memset( bufr, 0, sizeof bufr ) ;
+
+    msgdft( &msgh,
+            MSGDEFAULT,
+            "NAV",
+            MSGDEFAULT,
+            MSGDEFAULT,
+            MSGDEFAULT,
+            bufr,
+            256,
+            MSGID,
+            dests, 0,0,0,0 ) ;
+
+
+    maddstr( msgh, label, 0 ) ;
+    maddstr( msgh, appl->applname, sizeof appl->applname ) ;
+    maddstr( msgh, appl->logmode, sizeof appl->logmode ) ;
+    maddint( msgh, pln->cost ) ;
+    maddint( msgh, totalcost ) ;
+
+    if ( ! ( first = pln->start ) )  {
+         msg( &msgh, 91, 0 ) ;
+         enqmsg( msgh.mrbbufa, anchor, qh ) ;
+         return 0 ;
+    }
+
+    msg( &msgh, 90, 0 ) ;
+       enqmsg( msgh.mrbbufa, anchor, qh ) ;
+
+    tp.lvl = 1 ;
+    tp.msgh = &msgh ;
+    tp.dp = &dp ;
+
+    navtree( first, &tp ) ;
+
+    return 0 ;
+}
+
+void navtree(
+     struct suprarc *curr,
+     struct treeparms *tp )
+{
+
+    int    lvl ;
+
+    lvl = tp->lvl ;
+
+    if ( ! curr->peer ) {
+        tp->flag = SUP_ARC ;
+        printit( curr, tp ) ;
+
+        if ( curr->next ) {
+            tp->lvl = lvl ;
+            navtree( curr->next, tp ) ;
+        }
+
+        else  {
+            if ( curr->status & sta_TERM )
+                tp->termstate = TRUE ;
+            else
+                tp->termstate = FALSE ;
+
+            return ;
+        }
+
+        return ;
+    }
+
+    for ( ; curr; curr = curr->peer ) {
+        tp->flag = SUP_PEER ;
+        tp->lvl = lvl ;
+        printit( curr, tp ) ;
+
+        if ( curr->next ) {
+            tp->lvl = lvl + 1 ;
+            navtree( curr->next, tp ) ;
+        }
+
+        else {
+            if ( curr->status & sta_TERM )
+                tp->termstate = TRUE ;
+            else
+                tp->termstate = FALSE ;
+        }
+
+        if ( tp->dp ) {                   /* print END for navdump */
+            tp->flag = SUP_ARC ;
+            tp->lvl = lvl + 1 ;
+            printit( 0, tp ) ;
+        }
+    }
+
+    return ;
+
+}
+
+
+void printit (
+     void *curr,
+     struct treeparms *tp )
+{
+
+    struct suprarc  *p   ;
+    static const char blanksíù = "                            " ;
+    char   bufferí128ù ;
+    int    ident, i ;
+    int    lvl ;
+    MSGH   *msgh ;
+    struct dumpparms *dp ;
+    char   flag, *string ;
+
+    lvl = tp->lvl ;
+    msgh = tp->msgh ;
+    dp = tp->dp ;
+    flag = tp->flag ;
+
+    if ( curr )
+         fmtscrn( flag, curr, buffer ) ;
+
+    else {
+         if ( tp->termstate )
+             string = "END" ;
+         else
+             string = "FAIL" ;
+         strcpy( buffer, string ) ;
+    }
+
+    ident = 1 + (lvl-1)*3 ;
+
+    if ( ident + strlen(buffer) > dp->linelen )
+         ident = (dp->linelen)-strlen(buffer)+1 ;
+
+    if ( ident < 0 ) {
+         memset( buffer+(dp->linelen), 0 , 1 ) ;
+         ident = 1 ;
+    }
+
+    if ( flag & SUB_ARC )
+         lvl-- ;
+
+    memset( dp->bufr, 0 , 256 ) ;
+    maddint( *msgh, lvl ) ;
+    maddstr( *msgh, blanks, ident ) ;
+    maddstr( *msgh, buffer, 0 ) ;
+    msg( msgh, 95, 0 ) ;
+
+       enqmsg( msgh->mrbbufa, dp->anchor, dp->qh ) ;
+
+    p = (struct suprarc * ) curr ;
+    if ( p && dp->detail && (flag & SUP_ARC) && (p->Narc > 1) ) {
+        for ( i = 0 ; i < p->Narc ; i++ ) {
+            tp->flag = SUB_ARC ;
+            tp->lvl = lvl + 1 ;
+            printit( (p->arctab)+i, tp ) ;
+        }
+    }
+}
+
+
+void fmtscrn( char flag, void *b, char *buf )  {
+
+    int      strln   ;
+    char     scrní17ù ;
+    char     cap_stringí128ù ;
+    struct   suprarc   *p ;
+    struct   nvarc     *q ;
+    struct   nvstn     *stn0, *stn1 ;
+
+    *buf = 0 ;
+
+    if ( flag & SUP_ARC ) {
+         p = (struct suprarc *) b ;
+         stn0 = p->stn0 ;
+         stn1 = p->stn1 ;
+    }
+    else {
+         q = (struct nvarc *) b ;
+         stn0 = q->stn0 ;
+         stn1 = q->stn1 ;
+    }
+
+    if ( flag & SUB_ARC )
+         strcat( buf, "<" ) ;
+
+    strln = trimx( stn0->ssn, sizeof stn0->ssn, scrn ) ;
+    if ( !strln )
+         strln = trimx( stn0->name, sizeof stn0->name, scrn ) ;
+
+    if ( flag & PEER_ARC )
+         strcat( buf, "If " ) ;
+
+    strncat( buf, scrn, strln) ;
+
+    if ( flag & SUP_ARC )  {
+        navcapf( p->capabilitys0, cap_string ) ;
+        strcat( buf, cap_string ) ;
+    }
+
+    if ( stn0->scroll )
+        strcat( buf, "+" ) ;
+
+    strcat( buf, " -> " ) ;
+
+    strln = trimx( stn1->ssn, sizeof stn1->ssn, scrn ) ;
+
+    if ( !strln )
+         strln = trimx( stn1->name, sizeof stn1->name, scrn ) ;
+
+    strncat( buf, scrn, strln) ;
+
+    if ( flag & SUP_ARC )  {
+        navcapf( p->capabilitys1, cap_string ) ;
+        strcat( buf, cap_string ) ;
+    }
+
+    if ( stn1->scroll )
+        strcat( buf, "+" ) ;
+
+    if ( stn1->flag & flag_EXCP ||
+         (flag & SUP_ARC && p->capabilitys1 & cap_EXCP ) )
+
+         strcat( buf, "*" ) ;
+
+    else if ( stn1->attrs & attr_ERGN )
+         strcat( buf, "**" ) ;
+
+    if ( flag & PEER_ARC )
+         strcat( buf, " Then" ) ;
+
+    if ( flag & SUB_ARC )
+         strcat( buf, ">" ) ;
+}
+
+
+int  trimx( char *org, int len, char *scrn)  {
+
+     char   *c ;
+
+     memset( scrn, 0, len+1 ) ;
+
+     for (c = org+len-1; len && (*c==' ' || *c==0); c--, len--) ;
+
+     memcpy( scrn, org, len ) ;
+
+     return len ;
+}

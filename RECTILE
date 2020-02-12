@@ -1,0 +1,1624 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "convert.h"
+#include "stgmgr.h"
+#include "systbls.h"
+#include "region.h"
+#include "rgnprv.h"
+#include "textscan.h"
+#include "draw.h"
+
+/*
+** Local macros, structures and functions.
+*/
+
+#define mR2(a) a,a                     /* "repeat" macros             */
+#define mR4(a) mR2(a),mR2(a)
+
+struct sAccum                          /* rectangle accumulation area */
+  {
+  int              InteriorPoints;     /* interior points             */
+  int              EdgePoints;         /* edge qualified points       */
+  struct rect      Rect;               /* diagonally defined rectangle*/
+  struct corners   Corners;            /* corner defined rectangle    */
+  struct edges     Edges;              /* edge description            */
+  };
+
+#define ACCUMLN sizeof(struct sAccum)
+
+int dr2Point(                          /* resolve point definition    */
+  struct dr2drawp *,                   /* i/  - textscan control area */
+  int,                                 /* i/  - point definition index*/
+  char *,                              /* i/  - scan start address    */
+  struct sAccum *,                     /* i/o - accumulated rectangle */
+  struct rectsmry *                    /*  /o - rectangle summary     */
+  );
+
+/* ******************************************************************
+
+    Function: rectile - tile presentation space with region instances
+
+    Description:
+
+        This function accepts a region network represented by a
+        REGION TREE and constructs an INSTANCETREE describing the
+        set of rectangles found in the given presentation space.
+
+        The REGION TREE is hierarchical structure consisiting of a
+        single <rgntree> node and all of its associated <rgntry>
+        nodes.  The INSTANCE TREE is also a hierarchical structure
+        of <recentry> nodes.  Each <recentry> node represents an
+        instance of some <rgntree> node.  The entire INSTANCE TREE
+        is an instance of the REGION TREE.
+
+        Each <recentry> contains an upward ptr to its parent and a
+        downward ptr to a list of its subregion instances, if any.
+        Additionally, each contains a ptr to its next peer region
+        (a disctinct region having the same parent).  Finally, when
+        repeating regions are encountered the twin repetitions are
+        chained from the first instance.
+
+    Method:
+
+        A <recentry> representing the presentation space itself is
+        first constructed.  Then, recdraw is invoked to instantiate
+        all regions defined in the <rgntree> on that rectangle.
+
+    Returns:
+
+            0  - tiling complete
+        n < 0  - insufficient storage, partial results returned
+        n > 0  - error return (ref draw.h), partial results returned
+
+   ****************************************************************** */
+
+int rectile(
+    struct stghdrq  *qh,
+    struct rgntree  *rt,
+    struct recentry **rectree,
+    char   *buffer,
+    int    rows,
+    int    cols )
+
+{
+    int  rc ;
+    struct recentry *re ;
+
+    if ( ! rt->Ncount )
+        return 0 ;
+
+    if ( ! ( *rectree = re = stgget(qh, RECENTRYLN ) ) )
+        return -RECENTRYLN ;
+
+    memset( re, 0, RECENTRYLN ) ;
+
+    re->rn         = &rt->root ;
+    re->root       = re ;
+    re->rsmry.org  = buffer ;
+    re->rsmry.rows = rows ;
+    re->rsmry.cols = cols ;
+    re->rsmry.abs.ul.r = re->rsmry.abs.ul.c = 1 ;
+    re->rsmry.abs.lr.r = rows ;
+    re->rsmry.abs.lr.c = cols ;
+
+    rc = recdraw( qh, &rt->root, re, buffer, rows, cols ) ;
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Function:  recfree - free the INSTANCE TREE created by rectile
+
+   ****************************************************************** */
+
+int recfree(
+    struct stghdrq  *qh,
+    struct recentry **rectree )
+
+{
+    struct recentry *re, *renxt ;
+
+    for ( renxt = *rectree ; re = renxt ; )  {
+        renxt = re->next ;
+        stgretn( qh, RECENTRYLN, re) ;
+    }
+
+    *rectree = 0 ;
+    return 0 ;
+}
+
+/* ******************************************************************
+
+    Function:  recdraw - draw rectangles
+
+    Description:
+
+       This function is used to recursively tile a given presentation
+       space in a breadth-first fashion; first materializing all of
+       the region instances corresponding to subregions of the region
+       provided on entry.
+
+    Returns:
+
+       0      - tiling completed without error
+       n < 0  - insufficient storage, partial results returned
+       n > 0  - error, partial results returned
+
+   ****************************************************************** */
+
+int recdraw(
+    struct stghdrq  *qh,
+    struct rgntry   *rnpar,             /* parent region entry        */
+    struct recentry *recpar,            /* parent rectangle instance  */
+    char   *buffer,
+    int    rows,
+    int    cols )
+
+{
+    int    (*drawrtn)() ;
+
+    int    rc = 0, redraw, locator, nrows, ncols, partial ;
+    char   *nbuffer ;
+    void   *drawp ;
+
+    struct rgntry   *rn ;
+    struct sysrgn   *rgn ;
+    struct rmhdr    *rmh ;
+    struct dr2drawp *dr2p = 0 ;
+    struct dr1drawp dr1p ;
+    struct dr0drawp dr0p ;
+    struct recentry rec, *prec, *trec, **rptlist, **peers ;
+
+    if ( ! rows ÝÝ ! cols )
+        return err_RECT ;
+
+/* ------------------------------------------------------------------
+    Identify and initialize drawing method for current region. Three
+    drawing techniques are defined as described below. A distinct
+    drawing routine and parameter block are provided for each
+    technique.  Each technique corresponds to an instance "locator
+    method", in workbench parlance.
+
+       type 0 - largest unclaimed area coincident with the left edge
+                of the container (parent) region instance
+
+       type 1 - explicit row/column coordinates designate a region
+                instance or a pattern for materializing multiple
+                region instances
+
+       type 2 - text and pattern objects define edges and other
+                contraints for materializing one or more region
+                instances
+
+   ------------------------------------------------------------------
+    Step 1: Materialize the instances of all children of the given
+            region definition (rgntry) and attach those instances as
+            children of the given region instance (recentry).
+   ------------------------------------------------------------------ */
+
+    peers = &recpar->subrec ;
+
+    for ( rn = rnpar->subrgn ; rn ; rn = rn->peer )  {
+
+        rptlist = 0 ;
+        rgn     = rn->rgn ;
+        locator = rmxid( rgn, &rmh ) ;
+
+        switch ( locator )  {
+
+/*          ---------------------------------------------------------
+             type 1 - instance(s) designated by coordinates
+            --------------------------------------------------------- */
+
+            case RMHTYPE1:
+                drawrtn = dr1draw ;
+                drawp   = &dr1p ;
+
+                dr1p.r  = &((struct rm1meth *) rmh)->rect ;
+
+                dr1p.iteration = 0 ;
+                dr1p.Hrepeat   = rgn->Hrepeat ;
+                dr1p.Vrepeat   = rgn->Vrepeat ;
+                dr1p.Hpartial  = FALSE  /* rgn->Hrepeat */ ;
+                dr1p.Vpartial  = FALSE  /* rgn->Vrepeat */ ;
+                dr1p.buffer    = buffer ;
+                dr1p.rows      = rows ;
+                dr1p.cols      = cols ;
+                dr1p.rgn       = rgn ;
+                dr1p.recpar    = recpar ;
+                break ;
+
+/*          ---------------------------------------------------------
+             type 2 - instance(s) designated by "locator objects"
+            --------------------------------------------------------- */
+
+            case RMHTYPE2:
+                if ( rc = dr2init( rgn, &dr2p ) )
+                    return rc ;
+
+                drawrtn = dr2draw ;
+                drawp   = dr2p ;
+
+                dr2p->Hrepeat  = rgn->Hrepeat ;
+                dr2p->Vrepeat  = rgn->Vrepeat ;
+                dr2p->Hpartial = FALSE /* rgn->Hrepeat */ ;
+                dr2p->Vpartial = FALSE /* rgn->Vrepeat */ ;
+                dr2p->buffer   = buffer ;
+                dr2p->rows     = rows ;
+                dr2p->cols     = cols ;
+                dr2p->rn       = rn ;
+                dr2p->rgn      = rgn ;
+                dr2p->recpar   = recpar ;
+                break ;
+
+/*          ---------------------------------------------------------
+             type 0 - instance is unclaimed area
+            --------------------------------------------------------- */
+
+            default:
+                drawrtn = dr0draw ;
+                drawp   = &dr0p ;
+                dr0p.recpar    = recpar ;
+                break ;
+        }
+
+/*      -------------------------------------------------------------
+        locate instances for all subregions of the given region
+        ------------------------------------------------------------- */
+
+        for ( redraw = TRUE ; redraw ; )  {
+
+            memset( &rec, 0, RECENTRYLN ) ;
+
+            if ( redraw = ( *drawrtn )( drawp, &rec.rsmry ) )  {
+
+                if ( ! ( prec = stgget( qh, RECENTRYLN ) ) )  {
+                    rc = -RECENTRYLN ;
+                    break  ;
+                }
+
+                *prec        = rec ;
+                prec->rn     = rn ;
+                prec->parent = recpar ;
+                prec->root   = recpar->root ;
+                prec->next   = recpar->next ;
+                recpar->next = prec ;
+
+                if ( rptlist )
+                    *rptlist = prec ;
+
+                else  {
+                    *peers = prec ;
+                    peers  = &prec->peer ;
+                }
+
+                rptlist = &prec->rptrec ;
+                redraw  = rgn->Vrepeat ÝÝ rgn->Hrepeat ;
+            }
+        }
+
+        if ( dr2p )
+            dr2term( &dr2p ) ;
+    }
+
+/* ------------------------------------------------------------------
+    Step 2: Compute the absolute location of each region instance
+            with respect to the parent region instance. Because the
+            regions are drawn from outermost to innermost, that
+            perspective is always relative to the original
+            presentation space.
+
+            Once the absolute location is known, recur to draw all
+            of the subregion instances of each region instance drawn
+            at this level (and so on).
+   ------------------------------------------------------------------ */
+
+    for ( prec = recpar->subrec ; prec ; prec = prec->peer )  {
+
+        for ( trec = prec ; trec ; trec = trec->rptrec )  {
+
+            trec->rsmry.abs.ul.r = trec->rsmry.r.ul.r +
+                                   recpar->rsmry.abs.ul.r - 1 ;
+
+            trec->rsmry.abs.ul.c = trec->rsmry.r.ul.c +
+                                   recpar->rsmry.abs.ul.c - 1 ;
+
+            trec->rsmry.abs.lr.r = trec->rsmry.r.lr.r +
+                                   recpar->rsmry.abs.ul.r - 1 ;
+
+            trec->rsmry.abs.lr.c = trec->rsmry.r.lr.c +
+                                   recpar->rsmry.abs.ul.c - 1 ;
+
+            trec->rsmry.org = trec->root->rsmry.org +
+              (trec->rsmry.abs.ul.r - 1) * trec->root->rsmry.abs.lr.c +
+              trec->rsmry.abs.ul.c - 1 ;
+
+            trec->rsmry.rows = trec->rsmry.r.lr.r -
+                               trec->rsmry.r.ul.r + 1 ;
+
+            trec->rsmry.cols = trec->rsmry.r.lr.c -
+                               trec->rsmry.r.ul.c + 1 ;
+
+            partial = trec->rsmry.Vpartial ÝÝ trec->rsmry.Hpartial ;
+
+/*          ---------------------------------------------------------
+             if the subregion has dependent regions, draw them now
+            --------------------------------------------------------- */
+
+            if ( ! partial && trec->rn->subrgn )  {
+                nbuffer = trec->rsmry.org  ;
+                nrows   = trec->rsmry.rows ;
+                ncols   = trec->rsmry.cols ;
+
+                recdraw( qh, trec->rn, trec, nbuffer, nrows, ncols ) ;
+            }
+        }
+    }
+
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Series:    dr0 - unclaimed area method
+
+    Function:  dr0draw - identify instance
+
+    Description:
+
+    Returns:
+
+        TRUE  - rectangle found
+        FALSE - no rectangle satisfies requirements
+
+   ****************************************************************** */
+
+int dr0draw(
+    struct dr0drawp *dr0p,
+    struct rectsmry *rsmry )
+
+{
+    int  i, Nrows, rowndx, depth, found = FALSE ;
+    char rowstatí256ù, *rowsp, *rowse, *rowsfree = 0 ;
+    char *ps, *pe ;
+    struct recentry *rec ;
+
+    memset( rsmry, 0, RECTSMRYLN ) ;
+
+    rowsp = rowstat ;
+
+    if ( (Nrows = dr0p->recpar->rsmry.rows) > sizeof rowstat )
+        if ( ! ( rowsp = rowsfree = malloc( Nrows ) ) )
+            return FALSE ;
+
+    memset( rowsp, 0, Nrows ) ;
+    rowse = rowsp + Nrows ;
+
+    for ( rec = dr0p->recpar->subrec ; rec ; rec = rec->peer ) {
+
+        i = rec->rsmry.r.lr.r - rec->rsmry.r.ul.r + 1 ;
+        memset(rowsp + rec->rsmry.r.ul.r - 1, 1, i ) ;
+    }
+
+/*  -----------------------------------------------------------------
+     extract clean rectangle
+    ----------------------------------------------------------------- */
+
+    for ( ps = rowsp ; ps < rowse && *ps ; ps++ ) ;
+
+    if ( ps < rowse )  {
+        for ( pe = ps + 1 ; pe < rowse && ! *pe ; pe++ ) ;
+
+        rowndx         = ps - rowsp ;
+        depth          = pe - ps ;
+        rsmry->rows    = depth ;
+        rsmry->cols    = dr0p->recpar->rsmry.cols ;
+
+        rsmry->r.ul.r  = rowndx + 1 ;
+        rsmry->r.ul.c  = 1 ;
+        rsmry->r.lr.r  = rsmry->r.ul.r + depth - 1 ;
+        rsmry->r.lr.c  = rsmry->cols ;
+
+        rsmry->e.left  = edge_PARENT ;
+        rsmry->e.right = edge_PARENT ;
+        rsmry->e.top   = edge_PARENT ;
+        rsmry->e.bot   = edge_PARENT ;
+
+        if ( ps != rowsp )
+            rsmry->e.top = edge_PEER ;
+
+        if ( pe != rowse )
+            rsmry->e.bot = edge_PEER ;
+
+        found = TRUE ;
+    }
+
+    if ( rowsfree )
+        free( rowsfree ) ;
+
+    return found ;
+}
+
+
+/* ******************************************************************
+
+    Series:    dr1 - coordinate method
+
+    Function:  dr1draw - identify instance
+
+    Description:
+
+    Returns:
+
+        TRUE  - rectangle found
+        FALSE - no rectangle satisfies requirements
+
+   ****************************************************************** */
+
+int dr1draw(
+    struct dr1drawp *dr1p,
+    struct rectsmry *rsmry )
+
+{
+    int    width, depth, attempt, incr ;
+    int    hportion, hfill, htotal, hndx, vndx, colsleft ;
+    struct rect rec ;
+
+    attempt = dr1p->iteration++ ;
+
+    memset( rsmry, 0, RECTSMRYLN ) ;
+
+/* ------------------------------------------------------------------
+    inherit parent borders where indicated, compute dimensions
+   ------------------------------------------------------------------ */
+
+    rsmry->e.top   = edge_DEFINED ;
+    rsmry->e.bot   = edge_DEFINED ;
+    rsmry->e.left  = edge_DEFINED ;
+    rsmry->e.right = edge_DEFINED ;
+
+    if ( ! ( rec.ul.r = dr1p->r->ul.r ) )  {
+        rec.ul.r = 1 ;
+        rsmry->e.top = edge_PARENT ;
+    }
+
+    if ( ! ( rec.ul.c = dr1p->r->ul.c ) )  {
+        rec.ul.c = 1 ;
+        rsmry->e.left = edge_PARENT ;
+    }
+
+    if ( ! ( rec.lr.r = dr1p->r->lr.r ) )  {
+        rec.lr.r = dr1p->rows ;
+        rsmry->e.bot = edge_PARENT ;
+    }
+
+    if ( ! ( rec.lr.c = dr1p->r->lr.c ) )  {
+        rec.lr.c = dr1p->cols ;
+        rsmry->e.right = edge_PARENT ;
+    }
+
+    if (((width = rec.lr.c - rec.ul.c + 1 ) < 1)  ÝÝ
+        ((depth = rec.lr.r - rec.ul.r + 1 ) < 1))
+
+        return FALSE ;
+
+    if ( rec.ul.c > dr1p->cols )        /* guard following compuation */
+        return FALSE ;
+
+/* ------------------------------------------------------------------
+    using horizontal-then-vertical indexing to locate repeaters
+   ------------------------------------------------------------------ */
+
+    if ( ! dr1p->Hrepeat )  {
+        htotal = 1 ;
+        hndx   = 0 ;
+    }
+
+    else  {
+        hportion = dr1p->cols - rec.ul.c + 1 ;
+        hfill    = hportion / width ;
+        colsleft = hportion - hfill * width ;
+        htotal   = hfill + (colsleft && dr1p->Hpartial) ;
+        hndx     = attempt % htotal ;
+    }
+
+    if ( (vndx = attempt / htotal) && ! dr1p->Vrepeat )
+        return FALSE ;
+
+    incr      = width * hndx ;
+    rec.ul.c += incr ;
+    rec.lr.c += incr ;
+
+    if ( rec.ul.c > dr1p->cols )
+        return FALSE ;
+
+    incr      = depth * vndx ;
+    rec.ul.r += incr ;
+    rec.lr.r += incr ;
+
+    if ( rec.ul.r > dr1p->rows )
+        return FALSE ;
+
+/* ------------------------------------------------------------------
+    assign confidence attributes to borders of rectangle
+   ------------------------------------------------------------------ */
+
+    rsmry->r.ul.r = rec.ul.r ;
+    rsmry->r.ul.c = rec.ul.c ;
+    rsmry->r.lr.r = rec.lr.r ;
+    rsmry->r.lr.c = rec.lr.c ;
+
+    rsmry->e.top  Ý= edge_FOUND ;
+    rsmry->e.left Ý= edge_FOUND ;
+
+    if ( rec.lr.r <= dr1p->rows )
+        rsmry->e.bot Ý= edge_FOUND ;
+
+    else  {
+        rsmry->r.lr.r = dr1p->rows ;
+        rsmry->e.bot Ý= edge_PARENT ;
+    }
+
+    if ( rec.lr.c <= dr1p->cols )
+        rsmry->e.right Ý= edge_FOUND ;
+
+    else  {
+        rsmry->r.lr.c   = dr1p->cols ;
+        rsmry->e.right Ý= edge_PARENT ;
+    }
+
+/* ------------------------------------------------------------------
+    return complete rectangle - partials accepted if so requested
+   ------------------------------------------------------------------ */
+
+    drpartl( rsmry ) ;
+
+    if ((rsmry->Vpartial && ! dr1p->Vpartial)  ÝÝ
+        (rsmry->Hpartial && ! dr1p->Hpartial))
+
+        return FALSE ;
+
+    if ( recuniq( dr1p->recpar, &rsmry->r, dr1p->rgn ) )
+        return FALSE ;
+
+    return TRUE ;
+}
+
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2init - general initialization (also ref dr2term)
+
+    Description:
+
+       The TEXTSCAN function is used to locate the text strings and
+       patterns.  A TEXTSCANP parameter area is initialized for each
+       object, allowing current position to be checkpointed, etc.
+       over multiple calls.
+
+    Returns:
+
+        n < -1  - unsatisfied storage request
+        n = -1  - region has no point entries
+             0  - preparation complete, plist returned
+        n >  0  - invalid region definition (use rgndiag)
+
+   ****************************************************************** */
+
+int dr2init( struct sysrgn *rgn, struct dr2drawp **dr2pret )  {
+
+    int    rc = 0 ;
+    int    n, stgsize ;
+    struct textscanp *tsp ;
+    struct rm2meth   *rlm2 ;
+    struct r2point   *r2p ;
+    struct dr2drawp  *dr2p = 0 ;
+
+/* ------------------------------------------------------------------
+    validations, checkpoint area acquisition
+   ------------------------------------------------------------------ */
+
+    if ( rmxid( rgn, (struct rmhdr **) &rlm2 ) != RMHTYPE2 )
+        rc = err_METHOD ;
+
+    else if ( ! (n = rlm2->Npoints) )
+        rc = err_WARNING ;
+
+    else if ( ! (dr2p = malloc(stgsize = n * TEXTSCANPLN + DR2DRAWPLN)) )
+        rc = - stgsize ;
+
+/* ------------------------------------------------------------------
+    convert the point definitions to a textscan request array
+   ------------------------------------------------------------------ */
+
+    else  {
+        memset( dr2p, 0, stgsize ) ;
+
+        r2p = (struct r2point *) ( (char *) rlm2 + RM2LN ) ;
+
+        dr2p->rgn     = rgn ;
+        dr2p->Npoints = n ;
+        dr2p->r2p     = r2p ;
+        dr2p->r2pend  = r2p + n ;
+        dr2p->tsp     = (struct textscanp *) ((char *) dr2p + DR2DRAWPLN ) ;
+        dr2p->tspend  = dr2p->tsp + n ;
+
+        for ( tsp = dr2p->tsp ; n-- ; tsp++, r2p++ )  {
+
+            tsp->text  = (char *) rlm2 + r2p->object ;
+            tsp->textlen = r2p->order.objln ;
+            tsp->onlyrow = r2p->order.orgrow ;
+            tsp->onlycol = r2p->order.orgcol ;
+
+            tsp->opts Ý= SCAN_NONPRINTB ;
+
+            if ( rgn->searchbwd )
+                tsp->opts Ý= SCAN_BACKWARDS ;
+
+            if ( r2p->order.objtype & R2_TEXT )
+                tsp->opts Ý= SCAN_TEXT ;
+
+            if ( r2p->order.objtype & R2_PAT )
+                tsp->opts Ý= SCAN_PATTERN ;
+
+            if ( ! ( r2p->order.objtype & R2_CASE ) )
+                tsp->opts Ý= SCAN_IGNORECASE ;
+        }
+    }
+
+    *dr2pret = dr2p ;
+    return rc ;
+}
+
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2reset - prepare TEXTSCAN parameter list for reuse
+
+   ****************************************************************** */
+
+void dr2reset( struct dr2drawp *dr2p )  {
+
+    struct textscanp *tsp ;
+
+    for ( tsp = dr2p->tsp ; tsp < dr2p->tspend ; tsp++ )  {
+        tsp->resume = 0 ;
+        tsp->retlen = tsp->retrow = tsp->retcol = 0 ;
+    }
+}
+
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2term - free TEXTSCAN parameter lists (ref dr2init)
+
+   ****************************************************************** */
+
+void dr2term( struct dr2drawp **dr2p )  {
+
+    if ( *dr2p )  {
+        free( *dr2p ) ;
+        *dr2p = 0 ;
+    }
+}
+
+/* ******************************************************************
+
+    Function:  dr2draw - identify occurence of region type 2
+
+   ****************************************************************** */
+
+int dr2draw(                           /* locate region - type 2      */
+  struct dr2drawp *dr2p,               /* i/  - logical defintions    */
+  struct rectsmry *Rsmry               /* i/o - physical result smry  */
+  )
+
+{
+
+/* #define MAXPOINTS 32 */             /* max "points" allowed        */
+
+  struct sAccum Accum =                /* local accumulation work area*/
+    {
+    0,                                 /* interior points             */
+    0,                                 /* edge-qualified points       */
+    {{0,0},{0,0}},                     /* diagonally defined rectangle*/
+    {{0,0},{0,0},{0,0},{0,0}},         /* corner defined rectangle    */
+    {mR4(0)}                           /* edges description           */
+    };
+
+  dr2p->iteration++;
+
+  if (dr2p->tsp->retlen == -1)         /* stop looking ?              */
+    {
+    return(FALSE);                     /* yes, not resolved           */
+    }
+
+  dr2dbufr(dr2p);
+
+  if (dr2Point(                        /* resolve ALL points          */
+    dr2p,                              /* i/  - scan ctrl, pts. anchor*/
+    0,                                 /* i/  - point index to resolve*/
+    dr2p->tsp->resume,                 /* i/  - scan start address    */
+    &Accum,                            /* i/o - accumulated rectangle */
+    Rsmry                              /*  /o - rectangle summary     */
+    ))
+    {
+    dr2p->tsp->resume = dr2p->tsp->retptr; /* update resume location  */
+    return(TRUE);
+    }
+  else /* not resolved */
+    {
+    dr2p->tsp->retlen = -1;            /* ensure scan stops           */
+    return(FALSE);
+    }
+
+} /* dr2draw */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Locate rectangular region by resolving ALL it's point definitions. */
+/* If necsesary, an exhaustive search (via recursion) is performed    */
+/* against the parent region to resolve ALL points.                   */
+/*                                                                    */
+/* RETURNS:                                                           */
+/*   TRUE (non-zero) - if point(s) resolved                           */
+/*   FALSE (zero)    - if point(s) not resolved                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+#define mhvmerge (r2p->vert Ý r2p->horz)
+#define medge ((mhvmerge & R2_EDGE) != 0)
+#define minterior (((mhvmerge & R2_IN) && !(mhvmerge & R2_OUT)) != 0)
+
+int dr2Point(                          /* resolve point definition    */
+  struct dr2drawp* dr2p,               /* i/  - text scan control area*/
+  int              TspIndex,           /* i/  - point-definition index*/
+  char *           Resume,             /* i/  - scan start address    */
+  struct sAccum    * Accum,            /* i/o - accumulated results   */
+  struct rectsmry* Rsmry               /*  /o - rectangle summary     */
+  )
+
+{
+
+  struct textscanp *Tsp;               /* current textscan parmlist   */
+  struct r2point * r2p;                /* current region point        */
+  int              WorkRc;             /* work return code            */
+  int              Resolved;           /* point resolution status     */
+  struct sAccum    Local;              /* local accumulation work area*/
+
+  union uRectCorners                   /* rectangle/corners work area */
+    {
+    struct rect      Rect;             /* interior point result       */
+    struct corners   Corners;          /* edge qualified point result */
+   } Work;
+
+  static const struct edges cFoundEdges = /* all-edges-found constant */
+    {mR4((edge_FOUND Ý edge_DEFINED))};
+
+  /*
+  ** Access and initialize point definition.
+  */
+
+  if (TspIndex >= dr2p->Npoints)       /* point definition exist ?    */
+    {                                  /* no, initialize return data  */
+    return(TRUE);                      /* POINT RESOLVED              */
+    }
+
+  Tsp = dr2p->tsp + TspIndex;          /* access selected point def.  */
+  r2p = dr2p->r2p + TspIndex;
+
+  /*
+  ** Resolve point definition.
+  */
+
+  for(Resolved = FALSE,                /* point not resolved          */
+    Tsp->resume = Resume;              /* scan start location         */
+    (Resolved == FALSE)                /* while point not resolved... */
+    && (textscan(Tsp) > 0);            /* ... and scan successful     */
+    Tsp->resume = Tsp->retptr)         /* next scan start address     */
+    {
+
+    /*
+    ** Interior point.
+    */
+
+    if (!medge && minterior)           /* interior point ?            */
+      {
+      rectext(                         /* yes, enclose obj w/rectangle*/
+        Tsp,                           /* i/  - text scan result data */
+        &Work.Rect                     /*  /o - enclosing rectangle   */
+        );
+
+      memcpy(&Local, Accum, ACCUMLN);  /* localize accumulation       */
+
+      recxpand(                        /* combine w/prior rectangle(s)*/
+        &Local.Rect,                   /* i/o - combined result       */
+        &Work.Rect                     /* i/  - new rectangle         */
+        );
+
+      (Local.InteriorPoints)++;        /* bump interior-point count   */
+
+      /*
+      ** Initialize summary.
+      ** Assume ALL accumulated points are interior points.
+      */
+
+      memcpy(&Rsmry->r, &Local.Rect, RECTLN);
+      memcpy(&Rsmry->e, &cFoundEdges, EDGESLN);
+
+      } /* if ((!medge &&... */
+
+    /*
+    ** Edge-qualified point.
+    */
+
+    else /* edge-qualified point */
+      {
+
+      WorkRc = dr2drloc(               /* corner-ize edge-text        */
+        Tsp,                           /* i/  - text scan result data */
+        r2p,                           /* i/  - point definition      */
+        &Work.Corners                  /*  /o - cornerized result     */
+        );
+
+      if (WorkRc == 0)                 /* corner-ized ?               */
+        {
+        continue;                      /* no, offscreen. RE-SCAN      */
+        }
+
+      memcpy(&Local, Accum, ACCUMLN);  /* localize accumulation       */
+
+      WorkRc = dr2dmerg(               /* merge into accumulation     */
+        &Local.Corners,                /* i/o - merged corners        */
+        &Work.Corners                  /* i/  - new corners           */
+        );
+
+      if (WorkRc == 0)                 /* merge successful ?          */
+        {
+        continue;                      /* no, RE-SCAN                 */
+        }
+
+      Local.EdgePoints++;              /* bump edge-point count       */
+
+      /*
+      ** Update edge summary information.
+      */
+
+      if ((r2p->vert & R2_TOP) != 0)
+        {
+        Local.Edges.top = edge_FOUND Ý edge_DEFINED;
+        }
+      if ((r2p->vert & R2_BOT) != 0)
+        {
+        Local.Edges.bot = edge_FOUND Ý edge_DEFINED;
+        }
+      if ((r2p->horz & R2_LEFT) != 0)
+        {
+        Local.Edges.left = edge_FOUND Ý edge_DEFINED;
+        }
+      if ((r2p->horz & R2_RIGHT) != 0)
+        {
+        Local.Edges.right = edge_FOUND Ý edge_DEFINED;
+        }
+
+      } /* else edge-qualified point */
+
+    /*
+    ** Verify completeness of current accumulation.
+    */
+
+    if (Local.EdgePoints != 0)         /* any edge points ?           */
+      {                                /* yes                         */
+
+      /*
+      ** (Re)Initialize summary.
+      ** Assume ALL points are edge-qualified.
+      */
+
+      memcpy(&Rsmry->r.ul, &Local.Corners.ul, COORDLN);
+      memcpy(&Rsmry->r.lr, &Local.Corners.lr, COORDLN);
+      memcpy(&Rsmry->e, &Local.Edges, EDGESLN);
+
+      if (Local.InteriorPoints != 0)   /* any interior points ?       */
+        {                              /* yes                         */
+
+        /*
+        ** Mixture of point types. Merge interior-points and
+        ** edge-qualifed points into summary.  Floating edges are
+        ** pulled "toward" interior-defined rectangle to create the
+        ** SMALLEST rectangle which encloses/satisfies accumulated
+        ** point definitions.
+        */
+
+        if (Rsmry->r.ul.r == 0)        /* floating top edge ?         */
+          {
+          Rsmry->r.ul.r = Local.Rect.ul.r; /* yes, use interior.'s    */
+          }
+
+        if (Rsmry->r.ul.c == 0)        /* floating left edge ?        */
+          {
+          Rsmry->r.ul.c = Local.Rect.ul.c; /* yes, use interior.'s    */
+          }
+
+        if (Rsmry->r.lr.r == 0)        /* floating bottom edge ?      */
+          {
+          Rsmry->r.lr.r = Local.Rect.lr.r; /* yes, use interior's     */
+          }
+
+        if (Rsmry->r.lr.c == 0)        /* floating right edge ?       */
+          {
+          Rsmry->r.lr.c = Local.Rect.lr.c; /* yes, use interior's     */
+          }
+
+        if ((Rsmry->r.ul.r > Rsmry->r.lr.r) /* invalid rows ?         */
+
+          ÝÝ (Rsmry->r.ul.c > Rsmry->r.lr.c)/* ...OR invalid columns ?*/
+
+          ÝÝ (recisin(&Rsmry->r,       /* ...OR accumulated rectangle */
+          &Local.Rect) == 0))          /* NOT in summary rectangle ?  */
+          {
+          continue;                    /* yes, conflict. RE-SCAN      */
+          }
+
+        /* correct earlier bad assumumption */
+        memcpy(&Rsmry->e, &cFoundEdges, EDGESLN);
+
+        } /* mixture of point types - if (Local.InteriorPoints != 0)  */
+
+      else
+        {
+
+        /*
+        ** ALL edge-qualified points. Convert "floating" edges
+        ** to inheritted (parent region) edges.
+        */
+
+        if (Rsmry->r.ul.r == 0)        /* floating top edge ?         */
+          {
+          Rsmry->r.ul.r = 1;           /* yes, use parent's           */
+          Rsmry->e.top Ý= edge_PARENT; /* remember inheritance        */
+          }
+
+        if (Rsmry->r.ul.c == 0)        /* floating left edge ?        */
+          {
+          Rsmry->r.ul.c = 1;           /* use parent's                */
+          Rsmry->e.left Ý= edge_PARENT; /* remember inheritance       */
+          }
+
+        if (Rsmry->r.lr.r == 0)        /* floating bottom edge ?      */
+          {
+          Rsmry->r.lr.r = dr2p->rows;  /* yes, use parent's           */
+          Rsmry->e.bot Ý= edge_PARENT; /* remember inheritance        */
+          }
+
+        if (Rsmry->r.lr.c == 0)        /* floating right edge ?       */
+          {
+          Rsmry->r.lr.c = dr2p->cols;  /* yes, use parent's           */
+          Rsmry->e.right Ý= edge_PARENT; /* remember inheritance      */
+          }
+        } /* else ALL edge-qualified points. */
+      } /*  if (Local.EdgePoints != 0) */
+
+    if (recshape(                      /* peer/twin border conflict ? */
+      dr2p->recpar,                    /* i/  - peer/twin anchor      */
+      Rsmry,                           /* i/  - candidate rectangle   */
+      dr2p->rn,                        /* i/  - region tree entry     */
+      dr2p->rgn) == 0)                 /* i/  - SYSREGION             */
+      {
+
+      Resolved = dr2Point(             /* no, RECURSE remaining points*/
+        dr2p,                          /* i/  - scan-ctrl, pts. anchor*/
+        TspIndex + 1,                  /* i/  - next point to resolve */
+        0,                             /* i/  - scan start address    */
+        &Local,                        /* i/o - int./edge accumulation*/
+        Rsmry                          /*  /o - rectangle summary     */
+        );
+      } /* if (recshape... */
+
+    } /* for(Status = NotResolved... */
+
+  return(Resolved);                    /* resolution result           */
+
+} /* dr2Point */
+
+#undef mhvmerge
+#undef medge
+#undef minterior
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2dbufr - accept buffer designation
+
+   ****************************************************************** */
+
+void dr2dbufr( struct dr2drawp *dr2p )  {
+
+    struct textscanp *tsp ;
+
+    for ( tsp = dr2p->tsp ; tsp != dr2p->tspend ; tsp++ )  {
+
+        if ( tsp->resume )
+            tsp->resume = dr2p->buffer + (tsp->resume - tsp->buffer) ;
+
+        tsp->buffer = dr2p->buffer ;
+        tsp->rows   = dr2p->rows ;
+        tsp->cols   = dr2p->cols ;
+
+        tsp->row_offset = dr2p->recpar->rsmry.abs.ul.c - 1 ;
+        tsp->row_width  = dr2p->recpar->root->rsmry.abs.lr.c ;
+    }
+}
+
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2drloc - acquire edge line segment coordinates
+
+    Description:
+
+       Once an edge reference point has been located, this function
+       can be used to return the line segment designated by the
+       match in a convenient <corners> structure.
+
+    Returns:
+
+       TRUE  - edge is valid
+       FALSE - matched point not within container space
+
+   ****************************************************************** */
+
+int dr2drloc(
+    struct textscanp *tsp,      /* textscan parameter list            */
+    struct r2point   *r2p,      /* edge (point) definition            */
+    struct corners   *c )       /* edge return via corners            */
+
+{
+    int  onscreen = TRUE ;
+    int  row, col, vert, horz ;
+
+    vert = r2p->vert ;
+    horz = r2p->horz ;
+
+    memset( c, 0, sizeof(struct corners ) ) ;
+
+    if ( vert & R2_EDGE )  {
+
+        if ( vert & R2_TOP )
+            if ( vert & R2_IN )
+                c->ul.r = c->ur.r = tsp->retrow ;
+            else
+                if ( ( row = tsp->retrow + 1 ) > tsp->rows )
+                    onscreen = FALSE ;
+                else
+                    c->ul.r = c->ur.r = row ;
+
+        if ( vert & R2_BOT )
+            if ( vert & R2_IN )
+                c->ll.r = c->lr.r = tsp->retrow ;
+            else
+                if ( ( row = tsp->retrow - 1) == 0 )
+                    onscreen = FALSE ;
+                else
+                    c->ll.r = c->lr.r = row ;
+    }
+
+    if ( horz & R2_EDGE )  {
+
+        if ( horz & R2_LEFT )
+            if ( horz & R2_IN )
+                c->ul.c = c->ll.c = tsp->retcol ;
+            else
+                if ( ( col = tsp->retcol + tsp->retlen ) > tsp->cols )
+                    onscreen = FALSE ;
+                else
+                    c->ul.c = c->ll.c = col ;
+
+        if ( horz & R2_RIGHT )
+            if ( horz & R2_IN )
+                c->ur.c = c->lr.c = tsp->retcol + tsp->retlen - 1 ;
+            else
+                if ( ( col = tsp->retcol - 1 ) == 0 )
+                    onscreen = FALSE ;
+                else
+                    c->ur.c = c->lr.c = col ;
+    }
+
+    return onscreen ;
+}
+
+
+/* ******************************************************************
+
+    Series:    dr2 - object locator method
+
+    Function:  dr2dmerg - assimilate edge constraint
+
+    Description:
+
+       This function compares the edge information in <test> to that
+       previously accepted in <curr>.  If the new edge is compatible
+       with the previously accepted information, it is merged into
+       the <curr> structure, usually resulting in a more specific
+       instance specification.  Otherwise, the request is failed and
+       <curr> is not affected.
+
+    Returns:
+
+       TRUE  - edge accepted and returned in curr
+       FALSE - edge conflicts with prior definitions
+
+   ****************************************************************** */
+
+int dr2dmerg( struct corners *curr, struct corners *test )  {
+
+    int  i ;
+    struct corners copy ;
+    char   *p, *q ;
+
+    copy = *curr ;
+    p    = (char *) &copy ;
+    q    = (char *) test ;
+
+    for ( i = 0 ; i < sizeof(struct corners) ; i++, p++, q++ )  {
+        if ( *p != *q )
+            if ( *p && *q )
+                return FALSE ;
+            else
+                *p Ý= *q ;
+    }
+
+    if ( copy.lr.r && (copy.lr.r < copy.ur.r) )
+        return FALSE ;
+
+    if ( copy.lr.c && (copy.lr.c < copy.ll.c) )
+        return FALSE ;
+
+    memcpy( curr, &copy, sizeof *curr ) ;
+    return TRUE ;
+}
+
+
+/* ******************************************************************
+
+     Function:  drpartl - accept / reject partial rectangles
+
+     NOTE:  concept of "partials" is pending removal
+
+   ****************************************************************** */
+
+void drpartl( struct rectsmry *rsmry ) {
+
+    int test = edge_DEFINED Ý edge_FOUND ;
+
+    rsmry->Vpartial = rsmry->Hpartial = FALSE ;
+
+    if ( ((rsmry->e.left  & test) == edge_DEFINED)    ÝÝ
+         ((rsmry->e.right & test) == edge_DEFINED))
+
+            rsmry->Hpartial = TRUE ;
+
+    if ( ((rsmry->e.top & test) == edge_DEFINED)    ÝÝ
+         ((rsmry->e.bot & test) == edge_DEFINED))
+
+            rsmry->Vpartial = TRUE ;
+}
+
+
+/* ******************************************************************
+
+    Function: recuniq - overlay conflict identification
+
+    Description:
+
+       This function accepts a region instance in RECT format and
+       compares it for uniqueness with all of its peer regions.
+       Because only a single repeating region type is allowed at
+       any level of parentage, no twin test is needed.
+
+    Returns:
+
+            0 - candidate rectangle is unique
+         *rec - overlay detected with returned rectangle
+
+   ****************************************************************** */
+
+struct recentry *recuniq(
+    struct recentry *recpar,
+    struct rect     *rtest,
+    struct sysrgn   *rgn )
+
+{
+    struct recentry *rec ;
+
+    if ( ! rgn->background )  {
+
+        for ( rec = recpar->subrec ; rec ; rec = rec->peer )  {
+
+            if ( rec->rn->rgn->background )
+                continue ;
+
+            if ( rec->rn->rgn->distinct ÝÝ rgn->distinct )
+                if ( recovlp( rtest, &rec->rsmry.r ) )
+                    return rec ;
+        }
+    }
+
+    return 0 ;
+}
+
+
+/* ******************************************************************
+
+    Function:  recshape - region instance conflict detction/resolution
+
+    Description:
+
+       This function coordinates the "shaping" of region instances -
+       the process of making adjustments to region edge to negotiate
+       conflicts.  Conflicts are recognized and resolved as follows:
+
+          1) Background regions are invisible to peer regions.
+             They never cause conflicts.
+
+          2) Two mutually non-distinct regions are invisible to
+             each other and never conflict.
+
+          3) If two regions do not overlap, no conflict exists.
+
+          4) Otherwise, two rectangles contend for the same area
+             of the presentation space.  rectrim() is invoked to
+             resolve the dispute.  If it cannot, the call is failed.
+
+
+    Returns:
+
+            0 - candidate rectangle accepted
+         *rec - candidate rectangle borders not resolvable with *rec
+
+   ****************************************************************** */
+
+struct recentry *recshape(
+    struct recentry *recpar,
+    struct rectsmry *rsmry,
+    struct rgntry   *rn,
+    struct sysrgn   *rgn )
+
+{
+    struct recentry *rec, *twinp = 0 ;
+
+    for ( rec = recpar->subrec ; rec ; rec = rec->peer )  {
+
+        if ( rn == rec->rn )  {
+            twinp = rec ;
+            continue ;
+        }
+
+        if ( rgn->background )
+            continue ;
+
+        if ( rec->rn->rgn->background )
+            continue ;
+
+        if ( ! rec->rn->rgn->distinct && ! rgn->distinct )
+            continue ;
+
+        if ( recovlp( &rsmry->r, &rec->rsmry.r ) )
+            if ( ! rectrim( rsmry, &rec->rsmry, rgn, edge_PEER ) )
+                return rec ;
+    }
+
+    for ( ; twinp ; twinp = twinp->rptrec )  {
+
+        if ( recovlp( &rsmry->r, &twinp->rsmry.r ) )
+            if (! rectrim( rsmry, &twinp->rsmry, rgn, edge_TWIN) )
+                return twinp ;
+    }
+
+    return 0 ;
+}
+
+
+/* ******************************************************************
+
+    Function:  rectrim - region instance conflict resolution
+
+    Description:
+
+       This function attempts to resolve space disputes arising
+       when two (overlapping) region instances contend for a
+       single area of the presentation space. Note that the
+       disputed area is always rectangular (the intersection of
+       two rectangles is a rectangle).
+
+    Method:
+
+       The conflict is resolved, if possible, by moving a single
+       edge of either (1) the lower priority rectangle, or (2)
+       the higher priority rectangle.  Because rectangles are drawn
+       in a priority sequence, this approach generally imposes
+       additional constraints on the most recently materialized
+       instance.
+
+       "Negotiable" region instance edges are those that have been
+       inherited from the parent (container) instance.
+
+       "Changable" region instance edges are those not lying on an
+       edge of the intersection of the lower and higher priority
+       instances.
+
+       Only those edges that are both changable and negotiable can
+       be updated.
+
+       When TWIN region instances are compared, the "repeats
+       vertically" and "repeats horizontally" region attributes
+       influence the type of trim perfomred.  If the region repeats
+       vertically (exclusively) only top and bottom edge trims
+       considered.  If the region repeats horizontally (exclusively)
+       only left and right edge trims are considered.  If repetition
+       in both directions is concurrently indicated, trimming is done
+       according to the "perscribed order".
+
+       After accounting for trim eligibility as discussed above
+       the perscribed order of trim operations is as follows:
+
+           1. Vertical
+              a. Bottom
+              b. Top
+
+           2. Horizontal
+              a. Right
+              b. Left
+
+    Returns:
+
+       TRUE  - conflict resolved by instance trim
+       FALSE - conflict not detected or not resolvable
+
+   ****************************************************************** */
+
+int rectrim(
+    struct rectsmry *rlo,       /* lower priority rectangle           */
+    struct rectsmry *rhi,       /* higher priority rectangle          */
+    struct sysrgn   *rgn,       /* SYSREGION of low prio rectangle    */
+    int    trimtype )           /* PEER or TWIN conflict type         */
+
+{
+    int    trim ;
+    unsigned char *edgep ;
+    enum   { top, left, bot, right } ;
+    int    eligí4ù ;
+    struct rect join ;
+
+    join.ul.r = max( rlo->r.ul.r, rhi->r.ul.r ) ;
+    join.ul.c = max( rlo->r.ul.c, rhi->r.ul.c ) ;
+    join.lr.r = min( rlo->r.lr.r, rhi->r.lr.r ) ;
+    join.lr.c = min( rlo->r.lr.c, rhi->r.lr.c ) ;
+
+    if ( join.ul.r > join.lr.r ÝÝ join.ul.c > join.lr.c )
+        return FALSE ;
+
+/* ------------------------------------------------------------------
+    determine eligibility for edge to move - low prio rectangle
+   ------------------------------------------------------------------ */
+
+    eligítopù   = ! ( rlo->e.top & edge_FOUND ) &&
+                  ( join.lr.r != rlo->r.lr.r ) ;
+
+    eligíbotù   = ! ( rlo->e.bot & edge_FOUND ) &&
+                  ( join.ul.r != rlo->r.ul.r ) ;
+
+    eligírightù = ! ( rlo->e.right & edge_FOUND ) &&
+                  ( join.ul.c != rlo->r.ul.c ) ;
+
+    eligíleftù  = ! ( rlo->e.left & edge_FOUND ) &&
+                  ( join.lr.c != rlo->r.lr.c ) ;
+
+    if ( trimtype == edge_TWIN )    {
+
+        if ( rgn->Hrepeat && ! rgn->Vrepeat )
+            eligítopù = eligíbotù = FALSE ;
+
+        if ( rgn->Vrepeat && ! rgn->Hrepeat )
+            eligíleftù = eligírightù = FALSE ;
+    }
+
+/* ------------------------------------------------------------------
+    adjust borders - low prio rectangle
+   ------------------------------------------------------------------ */
+
+    if (trim = eligítopù ÝÝ eligíbotù ÝÝ eligíleftù ÝÝ eligírightù)  {
+
+        if ( eligíbotù )  {
+            rlo->r.lr.r = join.ul.r - 1 ;
+            rlo->Vtrim = TRUE ;
+            edgep = &rlo->e.bot ;
+        }
+
+        else if ( eligítopù )  {
+            rlo->r.ul.r = join.lr.r + 1 ;
+            rlo->Vtrim = TRUE ;
+            edgep = &rlo->e.top ;
+        }
+
+        else if ( eligírightù ) {
+            rlo->r.lr.c = join.ul.c - 1 ;
+            rlo->Htrim = TRUE ;
+            edgep = &rlo->e.right ;
+        }
+
+        else if ( eligíleftù )  {
+            rlo->r.ul.c = join.lr.c + 1 ;
+            rlo->Htrim = TRUE ;
+            edgep = &rlo->e.left ;
+        }
+
+        *edgep &= ~edge_PARENT ;
+        *edgep Ý=  edge_TRIMMED Ý trimtype ;
+    }
+
+/* ------------------------------------------------------------------
+    determine eligibility for edge to move - high prio rectangle
+   ------------------------------------------------------------------ */
+
+    if ( ! trim )  {
+
+        eligítopù   = ! ( rhi->e.top & edge_FOUND ) &&
+                      ( join.lr.r != rhi->r.lr.r ) ;
+
+        eligíbotù   = ! ( rhi->e.bot & edge_FOUND ) &&
+                      ( join.ul.r != rhi->r.ul.r ) ;
+
+        eligírightù = ! ( rhi->e.right & edge_FOUND ) &&
+                      ( join.ul.c != rhi->r.ul.c ) ;
+
+        eligíleftù  = ! ( rhi->e.left & edge_FOUND ) &&
+                      ( join.lr.c != rhi->r.lr.c ) ;
+
+        if ( trimtype == edge_TWIN )    {
+
+            if ( rgn->Hrepeat && ! rgn->Vrepeat )
+                eligítopù = eligíbotù = FALSE ;
+
+            if ( rgn->Vrepeat && ! rgn->Hrepeat )
+                eligíleftù = eligírightù = FALSE ;
+        }
+
+/* ------------------------------------------------------------------
+    adjust borders - high prio rectangle
+   ------------------------------------------------------------------ */
+
+        if (trim = eligítopù ÝÝ eligíbotù ÝÝ eligíleftù ÝÝ eligírightù)
+        {
+            if ( eligíbotù )  {
+                rhi->r.lr.r = join.ul.r - 1 ;
+                rhi->Vtrim = TRUE ;
+                edgep = &rhi->e.bot ;
+            }
+
+            else if ( eligítopù )  {
+                rhi->r.ul.r = join.lr.r + 1 ;
+                rhi->Vtrim = TRUE ;
+                edgep = &rhi->e.top ;
+            }
+
+            else if ( eligírightù ) {
+                rhi->r.lr.c = join.ul.c - 1 ;
+                rhi->Htrim = TRUE ;
+                edgep = &rhi->e.right ;
+            }
+
+            else if ( eligíleftù )  {
+                rhi->r.ul.c = join.lr.c + 1 ;
+                rhi->Htrim = TRUE ;
+                edgep = &rhi->e.left ;
+            }
+
+            *edgep &= ~edge_PARENT ;
+            *edgep Ý=  edge_TRIMMED Ý trimtype ;
+        }
+    }
+
+    return trim ;
+}
+
+
+/* ******************************************************************
+   ****************************************************************** */
+
+int drawsel(
+    struct recentry *rec,
+    char   rgnnameíRGNAMESZù,
+    char   drawopts )
+
+{
+    int  count = 0 ;
+    struct recentry *p, *rpt ;
+
+    if ( ! rec )
+        return 0 ;
+
+    if ( ! rgnname ÝÝ drawopts == draw_ALL )  {
+        count = drawall( rec->subrec ) ;
+        return count ;
+    }
+
+    for ( rec = rec->subrec ; rec ; rec = rec->peer )  {
+        for ( rpt = rec ; rpt ; rpt = rpt->rptrec )  {
+
+            if ( memcmp( rpt->rn->rgn->name, rgnname, RGNAMESZ ) )
+                count += drawsel( rpt, rgnname, drawopts ) ;
+
+            else  {
+                rpt->drawstat = TRUE ;
+                count++ ;
+
+                if ( drawopts == draw_SUCCESSORS )
+                    count += drawall( rpt->subrec ) ;
+
+                else if ( drawopts == draw_ANCESTORS )  {
+
+                    for ( p = rpt->parent ; p ; p = p->parent )  {
+                        if ( p->parent )  {
+                            p->drawstat = TRUE ;
+                            count++ ;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return count ;
+}
+
+
+/* ******************************************************************
+   ****************************************************************** */
+
+int drawall( struct recentry *rec )  {
+
+    int count = 0 ;
+    struct recentry *rpt ;
+
+    for ( ; rec ; rec = rec->peer )  {
+        for ( rpt = rec ; rpt ; rpt = rpt->rptrec )  {
+            rpt->drawstat = TRUE ;
+            count = drawall( rpt->subrec ) + 1 ;
+        }
+    }
+
+    return count ;
+}
+

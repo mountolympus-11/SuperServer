@@ -1,0 +1,214 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module: FLT3270 - Host Xport Filter / Request Rtns (3270)          *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This module contains functions specific to the $sess 3270 HLLAPI*
+*     implementation of Host Xport facility.  These functions are     *
+*     indentified to XPORT via the associated Xport profile table     *
+*     Entry.  Filter routines may be used to massage the data         *
+*     before and after xport processing.  The Request selector        *
+*     routines are called to determine the type of xport request      *
+*     from the $SESS data structures.                                 *
+*                                                                     *
+*  External Functions:                                                *
+*                                                                     *
+*     fl3270i - Inbound 3270 Filter routine                           *
+*     fl3270i - Outbound 3270 Filter routine                          *
+*     req3270 - Select request type from $sess request (3270 Hllapi)  *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/14/94  R. Colmone              Par# 134222                   *
+*                                                                     *
+*               Added Support for LU 6.2 by removing $sess            *
+*               dependencies from PSess and passing comm Block        *
+*               address to request selector routinue.                 *
+*                                                                     *
+**********************************************************************/
+
+#include <stdio.h>
+#include <stddef.h>
+#include "env.h"
+#include "sess.h"
+#include "hxpsess.h"
+#include "hxpprof.h"
+#include "flt3270.h"
+
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Function:  fl3270i - Inbound 3270 filter routine                   *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This function is an inbound packet filter routine.  The        *
+*      address of this function is obtain from the assocaited         *
+*      profile entry.  This function is responsible for validating    *
+*      that the received function packet is a standard Xport          *
+*      3270 (HLLAPI) header and to set the address of length of       *
+*      true packet data, (striping off the 3270 control data).        *
+*                                                                     *
+*  Parameters:                                                        *
+*                                                                     *
+*      Ptr to source data                                             *
+*      len of source data                                             *
+*      Ptr to ptr of packet origin (return)                           *
+*      Ptr to len of packet data   (return)                           *
+*                                                                     *
+*  Return:                                                            *
+*                                                                     *
+*      0 - Valid Xport Header                                         *
+*     -1 - Invalid Xport Header                                       *
+*                                                                     *
+**<DOC-OFF>***********************************************************/
+
+int fl3270i(char *src, int srclen, char **tgt, int *tgtlen ) {
+
+    struct readmod_ds_hdr *rds ;
+
+    char ROW1_COL4í2ù = { 0x40,0xc3 } ;
+
+    if ( srclen > READMOD_DS_HLN ) {
+        rds = (struct readmod_ds_hdr *) src ;
+
+        if ( rds->aid == AID_ENTER &&
+             ! memcmp( rds->sba,  ROW1_COL4, sizeof rds->sba ) ) {
+
+            *tgt    = rds->data ;
+            *tgtlen = srclen - READMOD_DS_HLN ;
+            return 0 ;
+        }
+    }
+    return -1 ;
+
+}
+
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Function:  fl3270o - Construct outbound 3270 datastream            *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will construct an outbound 3270 datastream        *
+*     for an Xport outbound transmission.  This function is pointed   *
+*     to by the xport profile for 3270 (HLLAPI) sessions.             *
+*     Thus enabling the HLLAPI protocol to by isolated from the       *
+*     xport protocol.                                                 *
+*                                                                     *
+*  Parameters:                                                        *
+*                                                                     *
+*     Address of source data                                          *
+*     Length  of source data                                          *
+*     Address of target area                                          *
+*     Length  of target area                                          *
+*                                                                     *
+*  Return:                                                            *
+*                                                                     *
+*     Pos value  - Length of target packet with filter overhead       *
+*     Neg value  - Required length of target area                     *
+*                                                                     *
+**<DOC-OFF>***********************************************************/
+
+int fl3270o(char *src, int srclen, char *tgt, int tgtlen ) {
+
+    struct write_ds_hdr *wds ;
+    int    len ;
+
+    len = srclen + WRITE_DS_HLN ;
+
+    if ( len > tgtlen )
+        return  ( - len ) ;
+
+/*  ---------------------------------------------------------------
+    Construct 3270 Write data stream
+    --------------------------------------------------------------- */
+    wds = (struct write_ds_hdr *) tgt ;
+
+    wds->cmdcode  = ERASE_WRITE_ALT ;
+    wds->wcc      = WCC_RESET ;
+    wds->sf1      = START_FLD ;              /* TMT Identifier fld  */
+    wds->attr1    = PROT_NORMAL ;
+    wds->field1   = 'T' ;
+    wds->sf2      = START_FLD ;              /* Packet data field   */
+    wds->attr2    = UNPROT_NORMAL ;
+
+    memcpy( wds->data, src, srclen ) ;
+    return len ;
+
+}
+
+
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Function:  req3270 - Select request type from 3270 HLLAPI session  *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This routine will determine and set the request type            *
+*     specified via the session request received.  If request         *
+*     specifies control information present, then the control         *
+*     flags in the SPLIST are examimed.  If the request is a          *
+*     data RU,  the Attention Identifier is examimed.                 *
+*                                                                     *
+*  Parameters:                                                        *
+*                                                                     *
+*     address of request structure                                    *
+*     address of session plist                                        *
+*                                                                     *
+*  Return:  ZERO - All conditions                                     *
+*                                                                     *
+**<DOC-OFF>***********************************************************/
+
+int req3270( struct request *req, void *commblk ) {
+
+    struct readmod_ds_hdr *rds ;
+    struct xpsess         *xps ;
+    struct splist         *spl ;
+
+    xps = ( struct xpsess * ) commblk ;
+    spl = xps->spl ;
+
+    if  ( spl->splcntdf & CNTDF_DATA ) {
+
+        rds = (struct readmod_ds_hdr *) req->data ;
+
+        if ( ( req->datalen > READMOD_DS_HLN ) &&
+             ( rds->aid  == AID_ENTER ) )
+            req->method  = FUNCTION ;
+
+        else if ( req->datalen == 1 ) {
+            req->method  = AID ;
+            req->methval = rds->aid ;
+        }
+    }
+    else {
+        req->method = CONTROL ;
+
+        if ( spl->splcntdc == CNTDC_SIGNAL )
+            req->methval = SIGNAL ;
+    }
+
+    return 0 ;
+
+}

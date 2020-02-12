@@ -1,0 +1,295 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module:      IHXPCTRC - Host Xport CPI-C Trace and Error Diag      *
+*                                                                     *
+*  Description: This module contains a set of functions used for      *
+*               diagnostic trace and error journaling.                *
+*                                                                     *
+*  Functions:   hxpctrc  - Xport CPI-C Diagnostic Trace               *
+*               hxpcerr  - Xport CPI-C Error Journaling               *
+*               codetext - Convert CPI-C code to message text         *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/14/94 R. Colmone           Par# 134222                       *
+*              Initial Version                                        *
+*                                                                     *
+**********************************************************************/
+
+#include <stddef.h>
+#include "env.h"
+#include "cmincl.h"
+#include "msg.h"
+#include "hxpcpic.h"
+#include "hxpctrc.h"
+
+/*-------------------------------------------------------------------
+  CPI-C error return codes and associated failure messages
+  -------------------------------------------------------------------*/
+static const struct codes errcodesíù = {
+    CM_OK ,                          "OK" ,
+    CM_ALLOCATE_FAILURE_NO_RETRY ,   "ALLOCATE_FAILURE_NO_RETRY" ,
+    CM_ALLOCATE_FAILURE_RETRY ,      "ALLOCATE_FAILURE_RETRY" ,
+    CM_CONVERSATION_TYPE_MISMATCH ,  "CONVERSATION_TYPE_MISMATCH" ,
+    CM_PIP_NOT_SPECIFIED_CORRECTLY , "PIP_NOT_SPECIFIED_CORRECTLY" ,
+    CM_SECURITY_NOT_VALID ,          "SECURITY_NOT_VALID" ,
+    CM_SYNC_LVL_NOT_SUPPORTED_LU ,   "SYNC_LVL_NOT_SUPPORTED_LU" ,
+    CM_SYNC_LVL_NOT_SUPPORTED_PGM ,  "SYNC_LVL_NOT_SUPPORTED_PGM" ,
+    CM_TPN_NOT_RECOGNIZED ,          "TPN_NOT_RECOGNIZED" ,
+    CM_TP_NOT_AVAILABLE_NO_RETRY ,   "TP_NOT_AVAILABLE_NO_RETRY" ,
+    CM_TP_NOT_AVAILABLE_RETRY ,      "TP_NOT_AVAILABLE_RETRY" ,
+    CM_DEALLOCATED_ABEND ,           "DEALLOCATED_ABEND" ,
+    CM_DEALLOCATED_NORMAL ,          "DEALLOCATED_NORMAL" ,
+    CM_PARAMETER_ERROR ,             "PARAMETER_ERROR" ,
+    CM_PRODUCT_SPECIFIC_ERROR ,      "PRODUCT_SPECIFIC_ERROR" ,
+    CM_PROGRAM_ERROR_NO_TRUNC ,      "PROGRAM_ERROR_NO_TRUNC" ,
+    CM_PROGRAM_ERROR_PURGING ,       "PROGRAM_ERROR_PURGING" ,
+    CM_PROGRAM_ERROR_TRUNC ,         "PROGRAM_ERROR_TRUNC" ,
+    CM_PROGRAM_PARAMETER_CHECK ,     "PROGRAM_PARAMETER_CHECK" ,
+    CM_PROGRAM_STATE_CHECK ,         "PROGRAM_STATE_CHECK" ,
+    CM_RESOURCE_FAILURE_NO_RETRY ,   "RESOURCE_FAILURE_NO_RETRY" ,
+    CM_RESOURCE_FAILURE_RETRY ,      "RESOURCE_FAILURE_RETRY" ,
+    CM_UNSUCCESSFUL ,                "UNSUCCESSFUL" ,
+    CM_DEALLOCATED_ABEND_SVC ,       "DEALLOCATED_ABEND_SVC" ,
+    CM_DEALLOCATED_ABEND_TIMER ,     "DEALLOCATED_ABEND_TIMER" ,
+    CM_SVC_ERROR_NO_TRUNC ,          "SVC_ERROR_NO_TRUNC" ,
+    CM_SVC_ERROR_PURGING ,           "SVC_ERROR_PURGING" ,
+    CM_SVC_ERROR_TRUNC ,             "SVC_ERROR_TRUNC" ,
+    CM_TAKE_BACKOUT ,                "TAKE_BACKOUT" ,
+    CM_DEALLOCATED_ABEND_BO ,        "DEALLOCATED_ABEND_BO" ,
+    CM_DEALLOCATED_ABEND_SVC_BO ,    "DEALLOCATED_ABEND_SVC_BO" ,
+    CM_DEALLOCATED_ABEND_TIMER_BO ,  "DEALLOCATED_ABEND_TIMER_BO" ,
+    CM_RESOURCE_FAIL_NO_RETRY_BO ,   "RESOURCE_FAIL_NO_RETRY_BO" ,
+    CM_RESOURCE_FAILURE_RETRY_BO ,   "RESOURCE_FAILURE_RETRY_BO" ,
+    CM_DEALLOCATED_NORMAL_BO ,       "DEALLOCATED_NORMAL_BO" ,
+} ;
+
+#define ERRCDCNT sizeof(errcodes) / sizeof( struct codes )
+
+/*-------------------------------------------------------------------
+  Conversation state Codes
+  -------------------------------------------------------------------*/
+static const struct codes cnvcodesíù = {
+    CM_RESET_STATE ,                 "RESET_STATE" ,
+    CM_INITIALIZE_STATE ,            "INITIALIZE_STATE" ,
+    CM_SEND_STATE ,                  "SEND_STATE" ,
+    CM_RECEIVE_STATE ,               "RECEIVE_STATE" ,
+    CM_SEND_PENDING_STATE ,          "SEND_PENDING_STATE" ,
+    CM_CONFIRM_STATE ,               "CONFIRM_STATE" ,
+    CM_CONFIRM_SEND_STATE ,          "CONFIRM_SEND_STATE" ,
+    CM_CONFIRM_DEALLOCATE_STATE ,    "CONFIRM_DEALLOCATE_STATE" ,
+    CM_DEFER_RECEIVE_STATE ,         "DEFER_RECEIVE_STATE" ,
+    CM_DEFER_DEALLOCATE_STATE ,      "DEFER_DEALLOCATE_STATE" ,
+    CM_SYNC_POINT_STATE ,            "SYNC_POINT_STATE" ,
+    CM_SYNC_POINT_SEND_STATE ,       "SYNC_POINT_SEND_STATE" ,
+    CM_SYNC_POINT_DEALLOCATE_STATE , "SYNC_POINT_DEALLOCATE_STATE" ,
+} ;
+
+#define CNVCDCNT sizeof(cnvcodes) / sizeof( struct codes )
+
+/*-------------------------------------------------------------------
+  Status received codes
+  -------------------------------------------------------------------*/
+static const struct codes stacodesíù = {
+    CM_NO_STATUS_RECEIVED ,          "NO_STATUS_RECEIVED" ,
+    CM_SEND_RECEIVED ,               "SEND_RECEIVED" ,
+    CM_CONFIRM_RECEIVED ,            "CONFIRM_RECEIVED" ,
+    CM_CONFIRM_SEND_RECEIVED ,       "CONFIRM_SEND_RECEIVED" ,
+    CM_CONFIRM_DEALLOC_RECEIVED ,    "CONFIRM_DEALLOC_RECEIVED" ,
+    CM_TAKE_COMMIT ,                 "TAKE_COMMIT" ,
+    CM_TAKE_COMMIT_SEND ,            "TAKE_COMMIT_SEND" ,
+    CM_TAKE_COMMIT_DEALLOCATE ,      "TAKE_COMMIT_DEALLOCATE" ,
+} ;
+
+#define STACDCNT sizeof(stacodes) / sizeof( struct codes )
+
+/*-------------------------------------------------------------------
+  Received data type codes
+  -------------------------------------------------------------------*/
+static const struct codes rdtcodesíù = {
+    CM_NO_DATA_RECEIVED ,            "NO_DATA_RECEIVED" ,
+    CM_DATA_RECEIVED ,               "DATA_RECEIVED" ,
+    CM_COMPLETE_DATA_RECEIVED ,      "COMPLETE_DATA_RECEIVED" ,
+    CM_INCOMPLETE_DATA_RECEIVED ,    "INCOMPLETE_DATA_RECEIVED" ,
+} ;
+
+#define RDTCDCNT sizeof(rdtcodes) / sizeof( struct codes )
+
+/*-------------------------------------------------------------------
+  Request to Send Received codes
+  -------------------------------------------------------------------*/
+static const struct codes rtscodesíù = {
+    CM_REQ_TO_SEND_NOT_RECEIVED,     "REQ_TO_SEND_NOT_RECEIVED" ,
+    CM_REQ_TO_SEND_RECEIVED,         "REQ_TO_SEND_RECEIVED" ,
+} ;
+
+#define RTSCDCNT sizeof(rtscodes) / sizeof( struct codes )
+
+
+/**********************************************************************
+*                                                                     *
+*  Function:    hxpctrc - CPI-C Diagnostic Trace                      *
+*                                                                     *
+*  Description: This function will generate a trace message from      *
+*               the current status and state information maintained   *
+*               in the Xport CPI-C communication block.               *
+*                                                                     *
+*  Parameters:  Address of Xport CPI-C communication block            *
+*                                                                     *
+*  Returns:     None.                                                 *
+*                                                                     *
+**********************************************************************/
+
+int hxpctrc( struct xpcpic *cpic ) {
+
+    MSGH msgh ;
+    char *rctext, *statext, *rdttext, *cnvtext, *rtstext ;
+
+/*  ----------------------------------------------------------------
+    Initialize message block
+    ---------------------------------------------------------------- */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ----------------------------------------------------------------
+    Retrieve message text for CPI-C codes
+    ---------------------------------------------------------------- */
+    if ( ! ( rctext  = codetext( errcodes, ERRCDCNT,
+                                 cpic->rc ) ) )
+        rctext  = "" ;
+
+    if ( ! ( statext = codetext( stacodes, STACDCNT,
+                                 cpic->statusreceived ) ) )
+        statext = "" ;
+
+    if ( ! ( rdttext = codetext( rdtcodes, RDTCDCNT,
+                                 cpic->datareceivedtype ) ) )
+        rdttext = "" ;
+
+    if ( ! ( cnvtext = codetext( cnvcodes, CNVCDCNT,
+                                 cpic->convstate ) ) )
+        cnvtext = "" ;
+
+    if ( ! ( rtstext = codetext( rtscodes, CNVCDCNT,
+                                 cpic->rtsreceived ) ) )
+        rtstext = "" ;
+
+/*  ----------------------------------------------------------------
+    Construct and issue CPI-C trace message
+    ---------------------------------------------------------------- */
+    maddstr( msgh, cpic->functionname, 0 ) ;
+    maddstr( msgh, rctext, 0 ) ;
+    maddint( msgh, cpic->rc ) ;
+
+    maddint( msgh, cpic->requestedlength ) ;
+    maddstr( msgh, cnvtext, 0 ) ;
+    maddint( msgh, cpic->convstate ) ;
+
+    maddint( msgh, cpic->receivedlength ) ;
+    maddstr( msgh, rdttext, 0 ) ;
+    maddint( msgh, cpic->datareceivedtype ) ;
+
+    maddint( msgh, cpic->sendlength ) ;
+    maddstr( msgh, statext, 0 ) ;
+    maddint( msgh, cpic->statusreceived ) ;
+
+    maddint( msgh, cpic->totalrecvlength ) ;
+    maddstr( msgh, rtstext, 0 ) ;
+    maddint( msgh, cpic->rtsreceived ) ;
+
+    msg( &msgh, 912, 0 ) ;
+
+    return 0 ;
+}
+
+/**********************************************************************
+*                                                                     *
+*  Function:    hxpcerr - CPI-C Error Diagnostic journalling          *
+*                                                                     *
+*  Description: This routine issues a generic error message to the    *
+*               log file for the CPI-C error encountered.             *
+*                                                                     *
+*  Parameters:  Address of XPCPIC communication block                 *
+*                                                                     *
+*  Returns:     None.                                                 *
+*                                                                     *
+**********************************************************************/
+
+int hxpcerr( struct xpcpic *cpic ) {
+
+    MSGH msgh ;
+    char *rctxt ;
+
+/*  ----------------------------------------------------------------
+    Initialize message block
+    ---------------------------------------------------------------- */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ----------------------------------------------------------------
+    Construct and issue CPI-C error message
+    ---------------------------------------------------------------- */
+    if ( ! ( rctxt = codetext( errcodes, ERRCDCNT, cpic->rc ) ) )
+        rctxt = "" ;
+
+    maddstr( msgh, rctxt, 0 ) ;
+    maddint( msgh, cpic->rc ) ;
+    maddstr( msgh, cpic->functionname, 0 ) ;
+
+    msg( &msgh, 20, 0 ) ;
+
+    return 0 ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function:    codetext - Retrieve code text for CPI-C code          *
+*                                                                     *
+*  Description: This routine will lookup the CPI-C code in the        *
+*               specified table and return the address of the         *
+*               associated text.                                      *
+*                                                                     *
+*  Parameters:  Code table address                                    *
+*               Count of entries in table                             *
+*               Code to be retrieved                                  *
+*                                                                     *
+*  Returns:     Address of associated text                            *
+*                                                                     *
+**********************************************************************/
+
+char * codetext( struct codes *codetab, int tabcount, int code ) {
+
+    int  i ;
+
+/*  ----------------------------------------------------------------
+    Locate code text associated with code
+    ---------------------------------------------------------------- */
+    for ( i = 0 ; i < tabcount ; i++ ) {
+        if ( codetabíiù.code == code )
+            return( codetabíiù.text ) ;
+    }
+
+    return 0 ;
+
+}

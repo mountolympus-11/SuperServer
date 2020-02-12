@@ -1,0 +1,85 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module:  ICOMSESS -  Communication request services ($SESS)        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This module contains the function which host xport services    *
+*      will invoke to communicate with $SESS managed Xport session    *
+*      partners.  The address of the communication request routine    *
+*      is contained in the Xport profile table entry.                 *
+*                                                                     *
+*  Functions:                                                         *
+*                                                                     *
+*     comsess - $SESS Communication request routine                   *
+*                                                                     *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/12/94 R. Colmone          Par# 134222                        *
+*              Initial Version                                        *
+*                                                                     *
+**********************************************************************/
+
+#include <stddef.h>
+#include "env.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpsess.h"
+#include "sess.h"
+
+/**********************************************************************
+*                                                                     *
+*  Function:  comsess - Communication request routine ( $SESS )       *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function is used to invoke the appropriate $SESS           *
+*     service as requested by host Xport services.                    *
+*                                                                     *
+*                                                                     *
+*  Parameters: Address of PSESS (Primary session block)               *
+*              request type                                           *
+*              Address of Data area                                   *
+*              Length  of Data area                                   *
+*                                                                     *
+*  Returns:    Return Code from Communication services                *
+*                 0 - Request completed successfully                  *
+*                ~0 - Request failed                                  *
+*                                                                     *
+**********************************************************************/
+
+int comsess( struct psess *ps,
+             int    request,
+             void   *data,
+             int    datalen )
+{
+
+    struct xpsess *xps ;
+
+    xps = (struct xpsess *) ps->commblk ;
+
+    return ( sess( 0, xps->sesstokn, request, data, datalen ) ) ;
+
+}
+

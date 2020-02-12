@@ -1,0 +1,746 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "intmem.h"
+#include "convert.h"
+#include "attrib.h"
+#include "systbls.h"
+#include "draw.h"
+#include "region.h"
+#include "nav.h"
+#include "image.h"
+
+/* *****************************************************************
+
+   Function: imgcmp - Image logical compare
+
+   Description:
+
+     This function will logically compare two screen image buffers
+     from their associated image structures.  If the images are of
+     identical size and both in standard format, the image compare
+     will proceed as described in METHOD below.  The caller of this
+     function is responsible for preparing the image structures which
+     requires that the regions from the base screen image are drawn
+     (rectile) on both images.  The screen compare uses the region
+     definitions and instances to determine whether a region is
+     required on a screen, for screen identification, and to exclude
+     portions of the images which should not be considered for
+     purposes of a compare.
+
+
+   Method:
+
+     The following sequence of validations is performed to compare
+     the candidate image (i2) with the base image (i1).  When a
+     MATCH or NOMATCH condition occurs in any of the following steps
+     no futher validation is performed.
+
+     1) If the screens are identical a MATCH condition is returned.
+
+     2) If a required region which is specified in the base
+        image rgntree is not located in the candidate image, the
+        compare is failed (NOMATCH).
+
+     3) If an identification region which is specified in the base
+        image rgntree is located in the candidate image, a MATCH
+        condition is returned.
+
+        *** NOT CURRENTLY IMPLMENTED ***
+     4) If both images have the attribute of line mode a MATCH
+        condition is returned.  If one image contains the attribute
+        of line mode a NOMATCH condition is returned.
+        *** NOT CURRENTLY IMPLMENTED ***
+
+     5) The image is prepared for a protected field compare.  This
+        is accomplished by locating all EXCLUDEd regions specified
+        in the base image rgntree.  All instances of each EXCLUDEd
+        region found in the base screen image are cleared in both
+        the working copy of the base image and the candidate image.
+        All instances of each EXCLUDEd region found in the candidate
+        region are cleared in both the base image and the candidate
+        image.  This method enables the largest rectangle and
+        overlapping rectangles to be omitted from the compare.
+
+        To continue with the preparation for field compare,  each
+        field is located in both image buffers.  The attribute bytes
+        are set to zero and the unprotected fields are cleared and
+        omitted from the compare.  What remains is the text from the
+        protected, unexcluded rectangles. This remainder is then
+        compared to determine if the images match.
+
+
+   Entry:  Image structure addr ( base image )
+           Image structure addr ( candidate image )
+           Compare info structure addr
+
+   Return: MATCH   - Screen images match
+           NOMATCH - Screen images do not match
+
+   Note:   The cmpinfo structure is completed with return information
+           explaining the reason for the MATCH/NOMATCH decision.
+
+   ***************************************************************** */
+
+int imgcmp( struct stghdrq *qh,        /* Storage pool queue header  */
+            struct image   *i1,        /* Base image                 */
+            struct image   *i2,        /* Candidate image            */
+            struct cmpinfo *ci )       /* Compare info return area   */
+{
+
+    struct recentry *re = 0 ;
+    struct rgntry   *rn = 0 ;
+    struct rgntree  *rt = 0 ;
+
+    char *s1, *s2, *c ;
+    int  pos, flen ;
+
+/*  ----------------------------------------------------------------
+    Clear screens will match another clear screen.  If both images
+    are clear then return MATCH, if one image is clear but the
+    other is not, return NOMATCH.
+    ---------------------------------------------------------------- */
+    if ( ( ! i1 ÝÝ ( i1->attrib & attrib_CLEAR ) ) &&
+         ( ! i2 ÝÝ ( i2->attrib & attrib_CLEAR ) ) )
+        return ( postci( ci, MATCH, RSN_CLEAR ) ) ;
+
+    if ( ( ! i1 ÝÝ ( i1->attrib & attrib_CLEAR ) ) ÝÝ
+         ( ! i2 ÝÝ ( i2->attrib & attrib_CLEAR ) ) )
+        return ( postci( ci, NOMATCH, RSN_CLEAR ) ) ;
+
+/*  ----------------------------------------------------------------
+    Obtain the region tree supplied in one of the images.
+    ---------------------------------------------------------------- */
+    rt = i1->rt ? i1->rt : i2->rt ;
+
+/*  ----------------------------------------------------------------
+    Initialize compare return area and validate request
+    ---------------------------------------------------------------- */
+    memset( ci, 0, sizeof( struct cmpinfo ) ) ;
+
+    if ( i1->imagesz != i2->imagesz )
+        return ( postci( ci, NOMATCH, RSN_IMGSIZE ) ) ;
+
+    if ( ! ( i1->format & format_STANDARD )   ÝÝ
+         ! ( i2->format & format_STANDARD ) )
+        return ( postci( ci, NOMATCH, RSN_IMGFMT ) ) ;
+
+/*  ----------------------------------------------------------------
+    If the two image buffers are exact duplicates, return match.
+    ---------------------------------------------------------------- */
+    if ( ! memcmp( i1->buffer, i2->buffer, i1->imagesz ) ) {
+        ci->bytes = i1->imagesz ;
+        return ( postci( ci, MATCH, RSN_EQUAL ) ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Select all required regions from region network and verify if
+    they are present in candidate screen image.
+    ---------------------------------------------------------------- */
+    if ( rt ) {
+        rn = &rt->root ;
+        while ( getrgn( &rn, REQUIRED ) ) {
+            if ( ( ! rgninimage( rn, i1->re ) )   ÝÝ
+                 ( ! rgninimage( rn, i2->re ) ) ) {
+                return ( postci( ci, NOMATCH, RSN_REQRGN ) ) ;
+            }
+        }
+    }
+
+/*  ----------------------------------------------------------------
+    Select screen identification regions.  If a screen ident region
+    is present in the candidate image, then it is assumed that the
+    candidate screen matches the specified base screen.
+    ---------------------------------------------------------------- */
+    if ( rt ) {
+        rn = &rt->root ;
+        while ( getrgn( &rn, IDENTIFICATION ) ) {
+
+            if ( ( ( i1->attrib2 & attrib2_OWNSRT ) ||
+                   ( rgninimage( rn, i1->re ) ) )   &&
+                 ( ( i2->attrib2 & attrib2_OWNSRT ) ||
+                   ( rgninimage( rn, i2->re ) ) ) )
+
+                return ( postci( ci, MATCH, RSN_IDENTRGN ) ) ;
+        }
+    }
+
+/*  ----------------------------------------------------------------
+    If both images are in line mode then assume for purposes of
+    compare that the screens match.  If only one image is in line
+    mode, then assume the screens do not match.
+    ---------------------------------------------------------------- */
+    if ( ( i1->attrib & attrib_LINEMODE )        &&
+         ( i2->attrib & attrib_LINEMODE ) )
+
+        return ( postci( ci, MATCH, RSN_LINEMODE ) ) ;
+
+    else if ( ( i1->attrib & attrib_LINEMODE )   ÝÝ
+              ( i2->attrib & attrib_LINEMODE ) )
+
+        return ( postci( ci, NOMATCH, RSN_LINEMODE ) ) ;
+
+/*  ----------------------------------------------------------------
+    Make a working copy of both base and candidate screen images
+    ---------------------------------------------------------------- */
+
+    s1 = stgget( qh, i1->imagesz + i2->imagesz ) ;
+
+    if ( s1 )  {
+        s2 = s1 + i1->imagesz ;
+        memcpy( s1, i1->buffer, i1->imagesz ) ;
+        memcpy( s2, i2->buffer, i2->imagesz ) ;
+    }
+
+    else
+        return ( postci( ci, NOMATCH, RSN_MEMORY ) ) ;
+
+/*  ----------------------------------------------------------------
+    Clear portions of both the base and candidate screens where
+    there are excluded regions.  This is performed in preparation
+    of a field by field compare of the protected fields on the screen.
+    Note that recentry from both rectree's are applied to both images.
+    ---------------------------------------------------------------- */
+    if ( rt ) {
+        rn = &rt->root ;
+        while ( getrgn( &rn, EXCLUDED ) ) {
+            if ( re = rgninimage( rn, i1->re ) ) {
+                for ( ; re ; re = re->rptrec ) {
+                    rectfill( &re->rsmry.abs, s1, 0, i1->cols ) ;
+                    rectfill( &re->rsmry.abs, s2, 0, i1->cols ) ;
+                }
+            }
+            if ( re = rgninimage( rn, i2->re ) ) {
+                for ( ; re ; re = re->rptrec ) {
+                    rectfill( &re->rsmry.abs, s1, 0, i1->cols ) ;
+                    rectfill( &re->rsmry.abs, s2, 0, i1->cols ) ;
+                }
+            }
+        }
+    }
+
+/*  ----------------------------------------------------------------
+    Locate all fields in each image.  If the field is unprotected,
+    then fill the field with zeroes (including the attr byte).  If
+    the field is protected, clear the attribute byte and count the
+    number of protected fields in the image.
+    ---------------------------------------------------------------- */
+    if ( ! CMPDONE(ci) ) {
+
+        for ( pos = 0 ; pos = locfld(i1, pos, &flen) ; ) {
+            c = s1 + pos - 1 ;
+            if ( *c & ATTR_PROTECT ) {
+                ci->protflds++ ;
+                ci->bytes += flen - 1 ;
+                *c = 0 ;
+            }
+            else
+                fldfill( s1, pos, flen, i1->rows, i1->cols, 0 ) ;
+        }
+
+        for ( pos = 0 ; pos = locfld(i2, pos, &flen) ; ) {
+            c = s2 + pos - 1 ;
+            if ( *c & ATTR_PROTECT )
+                *c = 0 ;
+            else
+                fldfill( s2, pos, flen, i2->rows, i2->cols, 0 ) ;
+        }
+    }
+
+/*  ----------------------------------------------------------------
+    The remainder of both working images should contain only text
+    from protected field where excluded regions are not drawn on
+    either image.  Compare the remainder of the images to determine
+    if the screens match.
+    ---------------------------------------------------------------- */
+    if ( ! CMPDONE(ci ) ) {
+        if ( memcmp( s1, s2, i1->imagesz ) )
+            postci( ci, NOMATCH, RSN_FIELDS ) ;
+        else
+            postci( ci, MATCH, RSN_FIELDS ) ;
+    }
+
+/*  ----------------------------------------------------------------
+    Release all storage acquired during the screen compare process.
+    ---------------------------------------------------------------- */
+
+    stgretn( qh, i1->imagesz + i2->imagesz, s1 ) ;
+
+    return ci->retcode ;
+}
+
+
+/* *****************************************************************
+
+   Function: imgprep - Prepare image structure for imgcomp
+
+   Description:
+
+      This function will prepare the image(s) provided for
+      subsequent screen compare (IMGCMP).  If a recentry tree is
+      currently posted to the image structure,  that rectree
+      structure is freed.
+
+      To prepare the image(s) for compare, regions are drawn
+      against all images provided.  If both images are provided
+      and separate rgntrees exist in these images,  then the
+      cmpinfo structure is posted with the MULTIRGN status
+      preventing regions from being merged on a DUPL screen
+      compare.  If a rgntree exists in one of the images, then a
+      rectile request is made to draw all regions in both images.
+
+   Maintenace:
+
+      10/03/94  Su-fen Wu          Par# 146469                          00380000
+                The region tree pointer (rt) in image i2 should be      00390000
+                reset to 0 for a session image.                         00400000
+
+   ***************************************************************** */
+
+int imgprep(
+             struct stghdrq *qh,      /* Storage pool queue header   */
+             struct image   *i1,      /* Addr of image structure 1   */
+             struct image   *i2,      /* Addr of image structure 2   */
+             struct cmpinfo *ci   )   /* Image compare status area   */
+{
+    int    rc = 0 ;
+    struct rgntree *rt ;
+
+    char   sessimgí9ù = "*SESSIMG*" ;
+
+    memset( ci, 0, sizeof( struct cmpinfo ) ) ;
+
+    rt = 0 ;
+
+/*  ----------------------------------------------------------------
+    Free existing recentry tree in image structures
+    ---------------------------------------------------------------- */
+    if ( !i2 || memcmp( i2->name, sessimg, sizeof sessimg ) )
+        if ( i1 && i1->re )
+            recfree( qh, &i1->re ) ;
+
+    if ( i2 && i2->re )
+        recfree( qh, &i2->re ) ;
+
+/*  ----------------------------------------------------------------
+    PAR# 146469
+    ---------------------------------------------------------------- */
+    if ( i2 && ! memcmp( i2->name, sessimg, sizeof sessimg ) )
+        i2->rt = 0 ;
+
+/*  ----------------------------------------------------------------
+    Verify that the images provided do not contain separate region
+    trees.  Obtain the region tree supplied in one of the images.
+    ---------------------------------------------------------------- */
+
+    if ( i1 && i2 )
+        if ( memcmp( i2->name, sessimg, sizeof sessimg ) )
+            if ( ( i1->rt && i2->rt ) && ( i1->rt != i2->rt ) )
+                return ( postci( ci, NOMATCH, RSN_MULTIRGN ) ) ;
+
+    if      ( i1 && i1->rt ) {
+        rt = i1->rt ;
+        i1->attrib2 |= attrib2_OWNSRT ;
+    }
+    else if ( i2 && i2->rt ) {
+        rt = i2->rt ;
+        i2->attrib2 |= attrib2_OWNSRT ;
+    }
+
+/*  ----------------------------------------------------------------
+    If either image has a region tree available, then attempt to
+    draw the specified rectangles on images provided.
+    ---------------------------------------------------------------- */
+    if ( rt )  {
+
+        if ( ( !i2 || memcmp( i2->name, sessimg, sizeof sessimg ) ) &&
+                i1 && !i1->re )  {
+            rc = rectile(qh,rt,&i1->re,i1->buffer,i1->rows,i1->cols) ;
+        }
+
+        if ( i2 && !i2->re )  {
+            rc = rectile(qh,rt,&i2->re,i2->buffer,i2->rows,i2->cols) ;
+            if ( !memcmp( i2->name, sessimg, sizeof sessimg ) )
+                i2-> rt = rt ;
+        }
+
+        if ( rc )
+            return ( postci( ci, NOMATCH, RSN_RECTILE ) ) ;
+    }
+
+    return ( postci( ci, MATCH, 0 ) ) ;  /* Proceed with compare     */
+}
+
+
+/* *****************************************************************
+
+   Function: imgbld - build IMAGE structure
+
+   Description:
+
+     This function accepts a SYSIMAGE entry and constructs an
+     IMAGE structure from it and various attributes contained
+     in an associated SYSNAVIGATION entry. Storage for the
+     structure is acquired from the storage pool provided.
+
+   ***************************************************************** */
+
+struct image * imgbld(
+            struct stghdrq  *qh,       /* storage pool queue hdr     */
+            struct sysimage *simg,     /* SYSIMAGE entry             */
+            char   *name )             /* name of image or zero      */
+{
+
+    long   size, totlen ;
+    struct image *i ;
+    char   *s ;
+
+/*  ----------------------------------------------------------------
+    allocate block large enough for IMAGE block and screen rectangle
+    ---------------------------------------------------------------- */
+
+    size   = simg->simgrows * simg->simgcols ;
+    totlen = sizeof( struct image ) + size ;
+
+    if ( ! ( i = stgget( qh, totlen ) ) )
+        return 0 ;
+
+/*  ----------------------------------------------------------------
+    if the image is squished, convert to standard form
+    ---------------------------------------------------------------- */
+
+    s = (char *) i + sizeof(struct image) ;
+
+    strcpy( i->id, "IMAGE" ) ;
+
+    if ( name )
+        memcpy( i->name, name, sizeof( i->name ) ) ;
+
+    if ( simg->simgsqsh )
+        usquish( simg->simgbufr.origin, simg->simgbufr.len, s, size ) ;
+    else
+        memcpy( s, simg->simgbufr.origin, size) ;
+
+    i->attached = TRUE ;
+    i->format   = format_STANDARD ;
+    i->buffer   = s ;
+    i->buflen   = size ;
+    i->imagesz  = size ;
+    i->rows     = simg->simgrows ;
+    i->cols     = simg->simgcols ;
+    i->roworg   = 1 ;
+    i->colorg   = 1 ;
+    i->csrp     = simg->simgcsrp ;
+
+    if ( locfld( i, 0, &totlen ) )
+        i->attrib2 Ý= attrib2_FMT ;
+
+    return i ;
+}
+
+/* *****************************************************************
+
+   Function: imgbld1 - Build IMAGE structure using session image
+
+   Description:
+
+      This function will construct an IMAGE structure using the
+      current session image buffer.
+
+   ***************************************************************** */
+
+struct image * imgbld1(
+            struct stghdrq  *qh,       /* storage pool queue hdr     */
+            char   *image,             /* Session image buffer       */
+            short  rows,               /* Number of rows in image buf*/
+            short  cols,               /* Number of cols in image buf*/
+            long   csrp )              /* Cursor Position            */
+
+{
+    struct image *i ;
+    char   sessimgíù = "*SESSIMG*" ;
+    int    len ;
+
+/*  ----------------------------------------------------------------
+    allocate image structure block
+    ---------------------------------------------------------------- */
+
+    if ( ! ( i = stgget( qh, sizeof( struct image ) ) ) )
+        return 0 ;
+
+/*  ----------------------------------------------------------------
+    if the image is squished, convert to standard form
+    ---------------------------------------------------------------- */
+    strcpy( i->id, "IMAGE" ) ;
+    memset( i->name, ' ', sizeof i->name ) ;
+    memcpy( i->name, sessimg, strlen(sessimg) ) ;
+
+    i->attached = FALSE ;
+    i->format   = format_STANDARD ;
+    i->buffer   = image ;
+    i->buflen   = rows * cols ;
+    i->imagesz  = rows * cols ;
+    i->rows     = rows ;
+    i->cols     = cols ;
+    i->roworg   = 1 ;
+    i->colorg   = 1 ;
+    i->csrp     = csrp ;
+
+    if ( locfld( i, 0, &len ) )
+        i->attrib2 Ý= attrib2_FMT ;
+
+    if ( ismemnull( i->buffer, i->buflen ) )
+        i->attrib Ý= attrib_CLEAR ;
+
+    return i ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: imgfree - Free IMAGE structure and associated areas
+
+   Description:
+
+      This function accepts the address of an image pointer and
+      releases the associated image structure and recentry tree
+      storage.
+
+   ***************************************************************** */
+
+int imgfree(
+             struct stghdrq *qh,      /* Storage pool queue header   */
+             struct image   **ip )    /* Addr of image pointer       */
+{
+
+    int size ;
+
+    struct image *i ;
+
+    if ( i = *ip ) {
+
+        if ( i->re )
+            recfree( qh, &i->re ) ;
+
+        size = sizeof( struct image ) ;
+        if ( i->attached )
+            size = size + i->buflen ;
+
+        stgretn( qh, size, i ) ;
+
+        *ip = 0 ;
+
+    }
+
+    return 0 ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: getrgn - Loc next region in the region tree with attrib
+
+   Description:
+
+     This function will locate the next available region and rgntry
+     with the specified region attribute.  The attribute field
+     specifies the offset within the sysrgn table row of the
+     requested attribute.
+
+   Entry:  Address of current rgntry pointer in rgntree
+           Offset to requested region attribute byte
+
+   Return: Address of sysrgn table  (rnp updated with current rgntry)
+           0 = End of rgntree
+
+   ***************************************************************** */
+
+struct sysrgn * getrgn( struct rgntry **rnp, int attribute )
+{
+
+    struct sysrgn *rgn = 0 ;
+    struct rgntry *rn ;
+
+    if ( rn = *rnp ) {
+        for ( rn = (*rnp)->next ; rn ; rn = rn->next ) {
+            if ( rn->rgn && *( (char *) rn->rgn + attribute ) ) {
+                rgn = rn->rgn ;
+                break ;
+            }
+        }
+    }
+
+    *rnp = rn ;
+
+    return rgn ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: rgninimage - Verify if a region is in a screen image
+
+   Description:
+
+     This function will verify is a specified region is available
+     in the screen images recentry tree.  If so,  the address of
+     the first recentry instance is returned.
+
+   Entry:  Address of rgntry
+           Address of the root recentry for the image
+
+   Return: Address of the first recentry instance in the image
+           0 = Region not found in image
+
+   ***************************************************************** */
+
+struct recentry * rgninimage( struct rgntry   *rn,
+                              struct recentry *rectree )
+{
+
+    struct recentry *re ;
+
+    for ( re = rectree ; re ; re = re->next )
+        if ( re->rn == rn )
+            break ;
+
+    return re ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: rectfill - Post fill character to image for rectangle
+
+   Description:
+
+     This function will post the specified fill character to all
+     positions of the screen image denoted by the rectangle
+     coordinates.
+
+   Entry:  Address of the rectangle structure
+           Address of the image buffer
+           Fill character
+           Number of columns per row in the image buffer
+
+   Return: Void.
+
+   ***************************************************************** */
+
+void rectfill( struct rect    *r,      /* Coord of rectangle to clr  */
+               char   *image,          /* Image buffer origin        */
+               char   fillbyte,        /* Fill character             */
+               int    cols )           /* Number of columns per row  */
+{
+
+    char *p ;
+    int  row, col ;
+
+    for ( row = r->ul.r ; row <= r->lr.r ; row++ ) {
+        for ( col = r->ul.c ; col <= r->lr.c ; col++ ) {
+            p  = image + ( (row - 1) * cols ) + col - 1 ;
+            *p = fillbyte ;
+        }
+    }
+
+    return ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: fldfill - Post fill character to image for pos / len
+
+   Description:
+
+     This function will post the specified fill character to all
+     positions of the screen image specified by the starting
+     position (1 = row 1, col 1) and length.
+
+   Entry:  Address of the image buffer
+           Starting position (relative to 1)
+           Length of the field to fill
+           Number of rows in the screen image
+           Number of cols in the screen image
+           Fill character
+
+   Return: Void
+
+   ***************************************************************** */
+
+void fldfill( char *image,             /* Image buffer origin        */
+              int  pos,                /* Starting position in buffer*/
+              int  len,                /* Length of field to fill    */
+              int  rows,               /* Number of rows in image    */
+              int  cols,               /* Number of cols in image    */
+              char fillbyte  )         /* Fill character             */
+{
+
+    int   l, size ;
+
+    pos-- ;
+    size = rows * cols ;
+
+    l = ( (pos + len) > size ) ? ( size - pos ) : len ;
+
+    memset( image + pos, fillbyte, l ) ;
+
+    if ( l < len )
+        memset( image, fillbyte, len - l ) ;
+
+    return ;
+
+}
+
+
+/* *****************************************************************
+
+   Function: postci - Set return/reason information in cmpinfo
+
+   Description:
+
+     This function will post the screen image compare return
+     and reason codes to the cmpinfo structure.
+
+   Entry:  Address of cmpinfo structure
+           screen compare return code
+           screen compare reason code
+
+   Return: Screen compare return code
+
+   ***************************************************************** */
+
+int postci( struct cmpinfo *ci, int rc, int rsn )
+{
+
+    ci->retcode = rc ;
+    ci->rsncode = rsn ;
+
+    return rc ;
+
+}

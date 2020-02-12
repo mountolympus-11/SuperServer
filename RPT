@@ -1,0 +1,1203 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*--------------------------------------------------------------------*/
+/* Unfinished:                                                        */
+/*   Documentation                                                    */
+/*   Add logic to accomodate RptList function                         */
+/*   Different date/time-format support                               */
+/*   Option processing                                                */
+/*--------------------------------------------------------------------*/
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#include "env.h"
+#include "stgmgr.h"
+#include "rcb.h"
+/*
+** change this ------
+*/
+#include "tkn.h"
+#include "tbs.h"
+#include "iprojx.h"
+#include "rptcfnc.h"
+/*-------------------*/
+#include "cmdscan.h"                   /* command scan                */
+#include "csp.h"                       /* command scan and post       */
+
+void lttime(struct tm *);              /* get local date/time         */
+
+/*
+** Report option values.
+*/
+
+typedef struct sRov
+  {
+  tLines           LinesPerPage;
+  tLineLength      LineLength;
+  tLines           PageLineId;
+  tLines           LastHeaderId;
+  tLineLength      MinWidth;
+  tLines           MinLines;
+  tRfo             Rfo;
+  tRcf             Rcf;
+  } tRov;
+
+#define mInitRov {0,0,0,0,0,0,0,0}
+
+static char * toprintstr(              /* storage to printable string */
+  char * Out,                          /* i/o - printable string      */
+  char * In,                           /* i/  - storage               */
+  int Length                           /* i/  - length to convert     */
+  );
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Open Report                                                        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Open report-writing to a device.                                   */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRcb * RptOpen(                        /* open report                 */
+  struct stghdrq * StgQ,               /* i/o - storage queue         */
+  tRdr *           Rdr,                /* i/  - report device routines*/
+  void *           Rdd,                /* i/  - device-open data      */
+  char *           Ros,                /* i/  - report option string  */
+  tRptRc *         Rc                  /* i/o - return code area      */
+  )
+
+{
+
+  static const tRcb RcbInit = mInitRcb; /*RCB initialializer          */
+  static const tDsv Dsv = mInitDsv;    /* default string initializer  */
+
+  tRcb *           Rcb;                /* report control block (RCB)  */
+  char *           TempPtr;            /* temporary title pointer     */
+  unsigned         Index;              /* temporary array index       */
+  tPrd             Prd;                /* product release data        */
+/*time_t           TimeT; */           /* date/time work area         */
+/*struct tm *      TmTime; */          /* date/time work area         */
+  tRov             Rov = mInitRov;     /* report format option values */
+  struct tm        TmTime;             /* date/time work area         */
+  char             ErrorMessageí80ù;   /* option-error message        */
+
+  if (Rc == NULLP)                     /* reasonable return code area?*/
+    {
+    return(NULLP);                     /* no, error                   */
+    }
+
+  *Rc = 0;                             /* initialize return code      */
+
+  /*
+  ** Process options.
+  */
+
+  *Rc = RptSetOptions(                 /* set report option values    */
+    Ros,                               /* i/  - report option string  */
+    &Rov,                              /* i/o - report option values  */
+    ErrorMessage                       /* i/o - message if error      */
+    );
+
+  if (*Rc != CspOK)                    /* option problem ?            */
+    {
+    return(NULLP);                     /* yes, error                  */
+    }
+
+  /*
+  ** Allocate and initialize RCB.
+  */
+
+  if ((Rcb = stgget(StgQ, sizeof(tRcb))) == NULLP) /* RCB allocated ? */
+    {
+    *Rc = RptErrorStgget;              /* no, error                   */
+    return(NULLP);
+    }
+
+  memcpy(Rcb, &RcbInit, sizeof(tRcb)); /* initialize RCB              */
+  Rcb->StgQ = StgQ;                    /* stoage queue                */
+  memcpy(&Rcb->Rdr, Rdr, sizeof(tRdr));/* save device routines        */
+
+  /*
+  ** Open report device.
+  */
+
+  if ((Rcb->Rdr.Open != NULLP)         /* device openable and opened ?*/
+    && ((*Rc = (*Rcb->Rdr.Open)(Rcb, Rdd)) != 0))
+    {
+    if (stgretn(Rcb->StgQ, sizeof(Rcb), Rcb) != 0) /* no, RCB freed ? */
+      {
+      Rcb->Rcs |= RcsRcbError;         /* no, trouble                 */
+      *Rc = RptErrorStgretn;
+      return(NULLP);
+      }
+    return(NULLP);
+    }
+
+  /*
+  ** Copy option values into RCB.
+  */
+
+  Rcb->Rfo = Rov.Rfo;
+  Rcb->Rcf = Rov.Rcf;
+  Rcb->LineLength = Rov.LineLength;
+  Rcb->LinesPerPage = Rov.LinesPerPage;
+  Rcb->PageLineId = Rov.PageLineId;
+  Rcb->LastHeaderId = Rov.LastHeaderId;
+
+  Rcb->PageLine = Rov.LinesPerPage;    /* force headers/top of page   */
+
+  /*
+  ** Allocate and initialize string pool for default title strings and
+  ** current title strings.
+  */
+
+  Rcb->PoolSize = sizeof(Dsv)+MaxLineLength*MaxTitleId+2*MaxRptBuffer;
+
+  if ((Rcb->StringPool = stgget(Rcb->StgQ, Rcb->PoolSize)) == NULLP)
+    {
+    if (Rcb->Rdr.Close != NULLP)
+      {
+      (*Rcb->Rdr.Close)(Rcb);          /* close device                */
+      }
+    if (stgretn(Rcb->StgQ, sizeof(Rcb), Rcb) != 0) /* Rcb freed ?     */
+      {
+      Rcb->Rcs |= RcsRcbError;         /* no, trouble                 */
+      *Rc = RptErrorStgretn;
+      return(NULLP);
+      }
+    *Rc = RptErrorStgget;              /* original error              */
+    return(NULLP);
+    }
+
+  memcpy(Rcb->StringPool, &Dsv, sizeof(Dsv));
+
+  /*
+  ** Point default title pointers at default strings in string pool.
+  */
+
+  Rcb->Defaultí0ù = ((tDsv *) Rcb->StringPool)->Null;
+  Rcb->Defaultí1ù = ((tDsv *) Rcb->StringPool)->Blank;
+  Rcb->Defaultí2ù = ((tDsv *) Rcb->StringPool)->Null;
+  Rcb->Defaultí3ù = ((tDsv *) Rcb->StringPool)->Blank;
+  Rcb->Defaultí4ù = ((tDsv *) Rcb->StringPool)->Null;
+  Rcb->Defaultí5ù = ((tDsv *) Rcb->StringPool)->Page;
+  Rcb->Defaultí6ù = ((tDsv *) Rcb->StringPool)->Product;
+  Rcb->Defaultí7ù = ((tDsv *) Rcb->StringPool)->Blank;
+  Rcb->Defaultí8ù = ((tDsv *) Rcb->StringPool)->DateTime;
+
+  for (Index = 9; Index < MaxTitleId; Index++)
+    {
+    Rcb->DefaultíIndexù = ((tDsv *) Rcb->StringPool)->Null;
+    }
+
+  /*
+  ** Get product release data and set strings to appropriate value.
+  */
+
+  GetProductRelease(&Prd);
+
+  sprintf(Rcb->Defaultí6ù,
+    "PLATINUM InfoSession %1d.%1d.%c",
+    Prd.Version, Prd.Release, Prd.ReleaseLevel);
+
+  /*
+  ** Set date/time default string to appropriate value.
+  */
+
+/*
+  time(&TimeT);
+  TmTime = gmtime(&TimeT);
+*/
+  lttime(&TmTime);
+  sprintf(Rcb->Defaultí8ù, "%02d:%02d %02d/%02d/%02d",
+    TmTime.tm_hour,
+    TmTime.tm_min,
+    TmTime.tm_mon + 1,
+    TmTime.tm_mday,
+    TmTime.tm_year);
+
+/*strftime(Rcb->Defaultí4ù,                           */
+/*  sizeof(StrDateTime), "%H:%M %m/%d/%y", TmTime);   */
+
+  /*
+  ** Get storage for each title save area entry.
+  */
+
+  TempPtr = (Rcb->StringPool + sizeof(Dsv));
+
+  for (Index = 0;
+    Index < MaxTitleId;
+    Index++)
+    {
+    Rcb->TitleíIndexù = TempPtr;       /* allocate title's storage    */
+    TempPtr += MaxLineLength;          /* next storage location       */
+    }
+
+  /*
+  ** Get storage for write-line buffer.
+  */
+
+  Rcb->Data = TempPtr;
+
+  /*
+  ** Set titles to default titles and build the header lines.
+  */
+
+  for (*Rc = 0, Index = 0;
+    (Index < MaxTitleId) && (*Rc == 0);
+    Index++)
+    {
+    *Rc = RptSetTitle(Rcb, Index, NULLP);
+    }
+
+  if (*Rc != 0)                        /* happy ?                     */
+    {
+    if (Rcb->Rdr.Close != NULLP)
+      {
+      (*Rcb->Rdr.Close)(Rcb);          /* close device                */
+      }
+    if ((stgretn(Rcb->StgQ, Rcb->PoolSize, Rcb->StringPool) != 0)
+      && (stgretn(Rcb->StgQ, sizeof(Rcb), Rcb) != 0))
+      {
+      Rcb->Rcs |= RcsRcbError;         /* no, trouble                 */
+      *Rc = RptErrorStgretn;
+      return(NULLP);
+      }
+    return(NULLP);                     /* original error set          */
+    }
+
+  /*
+  ** Initialize two of the titles to the blank string, rather than
+  ** their associated default string values.
+  */
+
+  if (((*Rc = RptSetTitle(Rcb, 9, StrBlank)) != 0)
+    || ((*Rc = RptSetTitle(Rcb,12, StrBlank)) != 0))
+    {
+    if (Rcb->Rdr.Close != NULLP)
+      {
+      (*Rcb->Rdr.Close)(Rcb);          /* close device                */
+      }
+    if ((stgretn(Rcb->StgQ, Rcb->PoolSize, Rcb->StringPool) != 0)
+      && (stgretn(Rcb->StgQ, sizeof(Rcb), Rcb) != 0))
+      {
+      Rcb->Rcs |= RcsRcbError;         /* no, real trouble            */
+      *Rc = RptErrorStgretn;
+      return(NULLP);
+      }
+    return(NULLP);                     /* original error set          */
+    }
+
+  Rcb->Rcs |= RcsOpened;               /* open                        */
+
+  return(Rcb);
+
+} /* RptOpen */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Set Report Title                                                   */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Set report and page-break headers with supplied title strings.     */
+/*                                                                    */
+/* Set the specified title-id to the supplied null terminated string. */
+/* Titles may be set/changed at any time after open processing        */
+/* and before close processing.  They are effective on the subsequent */
+/* page break.                                                        */
+/*                                                                    */
+/* Titles appear in two types of lines: PAGE-BREAK and HEADER.        */
+/* Their behavior is dependent upon the type of break as follows:     */
+/*                                                                    */
+/*   PAGE-BREAK lines are relevant only when an implicit page break   */
+/*   occurs (a request to write the headers is an explicit page break)*/
+/*   AND the page break control option is on. If both conditions are  */
+/*   met then PAGE-BREAK lines are written until the first null line  */
+/*   is encountered.                                                  */
+/*                                                                    */
+/*   All non-null HEADER lines are written regardless of the type of  */
+/*   page break that has occurred.                                    */
+/*                                                                    */
+/*   A line is considered null when all titles on that line are null  */
+/*   strings.  Lines which are considered null are NEVER written.     */
+/*                                                                    */
+/* A string address of zero (re)sets the title-id string to the       */
+/* default string value defined below.                                */
+/*                                                                    */
+/* Title-id(s) may be assigned the "" null string (to suppress it's   */
+/* header line from being written) or the " " blank string (to write  */
+/* the line without a title at that title-id location).               */
+/*                                                                    */
+/* The titles are located and justified as shown below:               */
+/*                                                                    */
+/* +--------------------------------------+ line type                 */
+/* |Title id=0    Title id=1   Title id=2 | header 0                  */
+/* |Title id=3    Title id=4   Title id=5 | header 1                  */
+/* |  :     :       :     :      :     :  |   :                       */
+/* |Title id=12   Title id=13  Title id=14| header 4                  */
+/* |Title id=15   Title id=16  Title id=17| page-break                */
+/* |Title id=18   Title id=19  Title id=20| page-break                */
+/* |Title id=21   Title id=22  Title id=23| page-break                */
+/* +--------------------------------------+                           */
+/*                                                                    */
+/* The intial layout after open processing is shown below:            */
+/* NOTE: For the initial layout, ALL HEADER lines and no PAGE-BREAK   */
+/* lines are written.                                                 */
+/* +--------------------------------------+ line type                 */
+/* |<null>                         <null> | header                    */
+/* |                <null>     Page %5d   | header                    */
+/* |InfoSession x.x.x      hh.mm mm/dd/yy | header                    */
+/* |                <null>         <null> | header                    */
+/* |                <null>         <null> | header                    */
+/* |<null>          <null>         <null> | page-break                */
+/* |<null>          <null>         <null> | page-break                */
+/* |<null>          <null>         <null> | page-break                */
+/* +--------------------------------------+                           */
+/*                                                                    */
+/* Default title strings                                              */
+/* ---------------------                                              */
+/* 0  - null                                                          */
+/* 1  - " " (blank)                                                   */
+/* 2  - null                                                          */
+/* 3  - " " (blank)                                                   */
+/* 4  - null                                                          */
+/* 5  - "Page %5d" (used to write the current page number)            */
+/* 6  - "InfoSession x.x.x (InfoSession release level)                */
+/* 7  - " " (blank)                                                   */
+/* 8  - "hh:mm mm/dd/yy" (current time and date at open time)         */
+/* 9  - null but initialized to " " (blank)                           */
+/* 10 - null                                                          */
+/* 11 - null                                                          */
+/* 12 - null but initialized to " " (blank)                           */
+/* 13 through 23 - null                                               */
+/* (Initializing title-ids 9 & 12 to blanks cause two blank lines to  */
+/* to be written at page-break time.)                                 */
+/*                                                                    */
+/* NOTES:                                                             */
+/* Default values are used as the initial values and both are defined */
+/* and set by open processing.                                        */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptSetTitle(                    /* set report title            */
+  tRcb *           Rcb,                /* i/o - report control block  */
+  unsigned         TitleId,            /* i/  - id of title to set    */
+  char *           Title               /* i/  - title address         */
+  )
+
+{
+
+  tLines           Hdr;                /* header line index           */
+  unsigned         TitleId0;           /* 1st title id of header line */
+  unsigned short   Pad;                /* variable expansion adjuster */
+  int              Ll;                 /* left half line length       */
+  int              Rl;                 /* right half line length      */
+  int              Lcl;                /* left center length          */
+  int              Rcl;                /* right center length         */
+  int              Lb;                 /* left side blanks            */
+  int              Rb;                 /* right side blanks           */
+
+/* verify Rcb is ok - remember, called from RptOpen */
+
+  /*
+  ** Validate title id
+  */
+
+  if (TitleId > MaxTitleId)            /* legal title id ?            */
+    {
+    Rcb->Rcs |= RcsBadParm;
+    return(RptErrorTitleid);           /* no, error                   */
+    }
+
+  if (Title == NULLP)                  /* null pointer ?              */
+    {
+    Title = Rcb->DefaultíTitleIdù;     /* yes, restore default title  */
+    }
+
+  /*
+  ** Left, center and right justify title lines within header line
+  */
+
+  Hdr = TitleId / 3;                   /* header line index           */
+  TitleId0 = Hdr * 3;                  /* title 0 on header line      */
+
+  /* save title */
+  strcpy(Rcb->TitleíTitleIdù, Title);
+
+  if ((*Rcb->TitleíTitleId0ù == NULLC) /* nullify header line ?       */
+    && (*Rcb->TitleíTitleId0 + 1ù == NULLC)
+    && (*Rcb->TitleíTitleId0 + 2ù == NULLC))
+    {
+    if (Rcb->HeaderíHdrù != NULLP)     /* yes. Free prior header ?    */
+      {
+      if (stgretn(Rcb->StgQ,           /* yes. Freed ?                */
+        MaxLineLength, Rcb->HeaderíHdrù) != 0)
+        {
+        Rcb->Rcs |= RcsRptError;       /* no, error                   */
+        return(RptErrorStgretn);
+        }
+      Rcb->HeaderíHdrù = NULLP;        /* nullify                     */
+      }
+    return(0);                         /* exit, header line nullified */
+    } /* if ((*Rcb->TitleíHdrù ... */
+
+  /*
+  ** Allocate header line
+  */
+
+  if (Rcb->HeaderíHdrù == NULLP)
+    {
+    if ((Rcb->HeaderíHdrù = stgget(Rcb->StgQ, MaxLineLength)) == NULLP)
+      {
+      Rcb->Rcs |= RcsRptError;         /* allocation failed           */
+      return(RptErrorStgget);
+      }
+    }
+
+  /*
+  ** Format header line
+  */
+
+  Pad = 0;
+
+  if (Hdr == Rcb->PageLineId)          /* header line contain page #? */
+    {
+    Pad += 2;                          /* length adjustment for page# */
+    }
+
+  Ll = Rcb->LineLength / 2;
+  Rl = Rcb->LineLength - Ll;
+
+  Lcl = strlen(Rcb->TitleíTitleId0 + 1ù) / 2;
+  Rcl = strlen(Rcb->TitleíTitleId0 + 1ù) - Lcl;
+
+  Lb = Ll - strlen(Rcb->TitleíTitleId0ù) - Lcl;
+  Rb = Rl - Rcl - (strlen(Rcb->TitleíTitleId0 + 2ù) + Pad);
+
+  sprintf(Rcb->HeaderíHdrù,
+    "%s% *.s%s% *.s%s",
+    Rcb->TitleíTitleId0ù,
+    Lb, "",
+    Rcb->TitleíTitleId0 + 1ù,
+    Rb, "",
+    Rcb->TitleíTitleId0 + 2ù
+    );
+
+  return(0);
+
+} /* RptSetTitle */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write report headers                                               */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Writes the current contents of the header lines provided the       */
+/* the suppress headers option is off.  Also, writes the page-break   */
+/* header lines; if the call to this routine is implicit (i.e. not    */
+/* called directly by the application) AND the page break option is   */
+/* on.  Implicit page breaks occur if a write request will overflow   */
+/* the page.                                                          */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptWriteHeaders(                /* write report headers        */
+  tRcb *           Rcb                 /* i/  - report control block  */
+  )
+
+{
+
+  tRcf             Rcf;                /* flag save area              */
+  unsigned short   LineId;             /* current header line index   */
+  tRptRc           Rc;                 /* return code                 */
+
+/* verify Rcb is valid */
+
+  if ((Rcb->Rfo & RfoNoHeaders) != 0)  /* suppress headers ?          */
+    {
+    return(0);                         /* yes, done                   */
+    }
+
+  Rcf = Rcb->Rcf;                      /* protect application's flags */
+  Rcb->Rcf |=                          /* this routine's flags        */
+    (RcfSpaceInCall | RcfGroupInCall | RcfHeaders);
+
+  /*
+  ** Process standard header lines.
+  */
+
+  for (LineId = 0;                     /* first header line           */
+    LineId <= Rcb->LastHeaderId;       /* while more header lines     */
+    LineId++)                          /* next header line            */
+    {
+
+    if (Rcb->HeaderíLineIdù == NULLP)  /* null ?                      */
+      {
+      continue;                        /* yes, next header line       */
+      }
+
+    if (((Rcb->Rfo & RfoPageNumber) != 0) /* number pages ? and this  */
+      && (LineId == Rcb->PageLineId))  /* is the page number line ?   */
+      {
+      if ((Rc = RptWrite(              /* write line with page# parm  */
+        Rcb,
+        (LineId == 0) ? -1 : 1,        /* top of page ? line spacing  */
+        1,                             /* line grouping               */
+        Rcb->HeaderíLineIdù,           /* data                        */
+        (LineId == 0) ? Rcb->Page+1 : Rcb->Page)) /* page# parm       */
+        != 0)
+        {
+        Rcb->Rcf = Rcf;                /* no, restore appl.'s flags   */
+        return(Rc);                    /* return error                */
+        }
+      continue;                        /* line written, next line     */
+      }
+
+    if ((Rc = RptWrite(                /* header line written ?       */
+      Rcb, (LineId == 0) ? -1 : 1, 1, Rcb->HeaderíLineIdù))
+      != 0)
+      {
+      Rcb->Rcf = Rcf;                  /* no, restore appl.'s flags   */
+      return(Rc);                      /* return error                */
+      }
+
+    } /* for (LineId ... */
+
+  /*
+  ** Process implicit-page-break lines.
+  */
+
+  if (((Rcb->Rcf & RcfImplicit) != 0)  /* implicit page break         */
+    && ((Rcb->Rfo & RfoPageBreak) != 0))/* and page-break-process on? */
+    {
+    for (LineId = Rcb->LastHeaderId + 1;/* yes, write                 */
+      ((LineId < MaxHdrLine) && (Rcb->HeaderíLineIdù != NULLP));
+      LineId++)
+      {
+
+      if ((Rc = RptWrite(              /*  line written ?             */
+        Rcb, 1, 1, Rcb->HeaderíLineIdù)) != 0)
+        {
+        Rcb->Rcf = Rcf;                /* no, restore appl.'s flags   */
+        return(Rc);                    /* return error                */
+        }
+
+      } /* for (LineId ... */
+    } /* if ((Rcb->Rcf & ... */
+
+  Rcb->Rcf = Rcf;                      /* restore appl.'s flags       */
+  return(0);                           /* return error                */
+
+} /* RptWriteHeaders */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Write report data - write a line of data to the device             */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Mutually recursive with RptWriteHeaders                            */
+/*                                                                    */
+/* Report line spacing and line grouping are optional parms as set    */
+/* by open options.                                                   */
+/*                                                                    */
+/* Report line spacing and line grouping may be suppresed as set by   */
+/* open options.                                                      */
+/*                                                                    */
+/* Implicit page breaks (as a result of page overflow) may be         */
+/* suppressed as set by open options.                                 */
+/*                                                                    */
+/* Writing of report headers may be suppressed as set by open options.*/
+/* (see RptWriteHeaders)                                              */
+/*                                                                    */
+/* Device write routine (as set during open processing) is invoked.   */
+/*                                                                    */
+/* The device routine is responsible for writing the proper line/page */
+/* feeds (as indicated in the passed RCB) as well as the actual data. */
+/*                                                                    */
+/* Line spacing control:                                              */
+/*   -1 indicates a form feed                                         */
+/*    0 indicates no data is written                                  */
+/*    1 indicates space one line (i.e. write the data)                */
+/*    2 indicates space two lines (i.e. one blank line, and data line)*/
+/*    :                                                               */
+/*    n indicates space n lines                                       */
+/*                                                                    */
+/* Line grouping control:                                             */
+/*    n indicates that n lines must be available on the page before   */
+/*      writing.  If n lines are not available then an implicit       */
+/*      page break occurs and the data written.                       */
+/*                                                                    */
+/* Notes:                                                             */
+/* Add Line wrap vs. line truncation option.                          */
+/* Add option to strip trailing blanks.                               */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptWrite(                       /* write report data           */
+  tRcb *           Rcb,                /* i/o - report control block  */
+  ...                                  /* i/  - unknown number of args*/
+  )
+
+{
+
+  /* defaulted, optional call arguments */
+  int              Rls;                /* i/  - report line spacing   */
+  int              GroupLines;         /* i/  - line grouping needs   */
+  /* call arguments after above optional args */
+  char *           Format;             /* i/  - format string         */
+  va_list          ArgList;            /* i/  - argument list         */
+
+  tLines           Lines;              /* lines needed on page        */
+  tRptRc           Rc = 0;             /* return code                 */
+
+/* verify Rcb is ok */
+
+  /*
+  ** CAUTION: Modify local variables only, NOT Rcb variables, until
+  ** after the recursive call via RptWriteHeaders (except for control
+  ** flag variable to prevent "infinite" recursion. Alternatively,
+  ** save and restore Rcb variable values over the recursive call.)
+  */
+
+  GroupLines = 1;                      /* assume no line group parm   */
+  Rls = 1;                             /* assume no line space parm   */
+
+  /*
+  ** Determine call arguments.
+  */
+
+  va_start(ArgList, Rcb);              /* optional args after RCB     */
+
+  if ((Rcb->Rcf & RcfSpaceInCall) != 0)/* line space arg in call ?    */
+    {
+    Rls = va_arg(ArgList, int);        /* yes, retrieve it            */
+    }
+
+  if ((Rcb->Rcf & RcfGroupInCall) != 0) /* line group arg in call ?   */
+    {
+    GroupLines = va_arg(ArgList, int); /* yes, retrieve it            */
+    }
+
+  if (Rls == 0)                        /* any lines to write ?        */
+    {
+    return(0);                         /* no, done                    */
+    }
+
+  /*
+  ** Line grouping suppression
+  */
+
+  if ((Rcb->Rfo & RfoGroupSuppress) != 0) /* suppress line grouping ? */
+    {
+    GroupLines = 1;                    /* yes, suppressed             */
+    }
+
+  /*
+  ** Line spacing suppression (excludes header form feeds but includes
+  ** i.e. suppresses, non-header requested form feeds).
+  */
+
+  if ((Rcb->Rfo & RfoSpaceSuppress) != 0) /* suppress line spacing ?  */
+    {
+    if ((Rls < 0) && ((Rcb->Rcf & RcfHeaders) != 0)) /* eject ?       */
+      {
+      /* form feed (page eject) from headers not suppressed */
+      /* Rcb->PageLine = 0; */
+      /* Rcb->Page++;       */
+      /* Rcb->Rls = -1;     */
+      }
+    else
+      {
+      Rls = 1;                         /* suppress line spacing       */
+      Rcb->Rls = 1;
+      }
+    }
+
+  /*
+  ** Write headers if not enough room on the page.
+  */
+
+  Lines = max(Rls, GroupLines);
+
+  if (((Rcb->Rcf & RcfHeaders) == 0)   /* NOT called by header routine*/
+    && ((Rcb->PageLine + Lines)        /* (avert infinite recursion)  */
+    > Rcb->LinesPerPage))              /* and insufficient lines      */
+    {
+    Rcb->Rcf |= RcfImplicit;           /* yes, implicit page break    */
+    Rc = RptWriteHeaders(Rcb);         /* write headers               */
+    Rcb->Rcf &= (~RcfImplicit);        /* implicit page break finished*/
+    if (Rc != 0)                       /* written ok ?                */
+      {
+      return(Rc);                      /* no, error                   */
+      }
+    }
+
+  if ((Rcb->Rls = Rls) < 0)            /* form feed ?                 */
+    {
+    Rcb->LeadLines = Rcb->LinesPerPage - Rcb->PageLine;
+    Rls = 1;                           /* data's line # on page       */
+    Rcb->PageLine = 0;
+    Rcb->Page++;
+    }
+  else
+    {
+    Rcb->LeadLines = Rls - 1;          /* line feeds                  */
+    if ((Rcb->PageLine + Rcb->LeadLines) >= Rcb->LinesPerPage)
+      {
+      Rls = 1;                         /* data's line# on page        */
+      Rcb->Rls = -1;                   /* form feed                   */
+/*
+      Rls = Rcb->LeadLines % Rcb->LinesPerPage;
+      Rcb->LeadLines =
+    lines feeds directly following page feed (forget 'em for now)
+    need RCB var to hold line feeds before page feed ?
+        (Rcb->LinesPerPage - (Rcb->Pageline + RcbLeadLines)
+*/
+      Rcb->LeadLines = 0;
+      Rcb->PageLine = 0;
+      Rcb->Page++;
+      }
+    }
+
+  Rcb->PageLine += Rls;                /* data's line # on page       */
+
+  Format = va_arg(ArgList, char*);     /* access format string        */
+
+  vsprintf(Rcb->Data, Format, ArgList);/* stuff data into the buffer  */
+
+  va_end(ArgList);
+
+  if (Rcb->Rdr.Write != NULL)          /* device routine exist ?      */
+    {
+    Rc = (*Rcb->Rdr.Write)(Rcb);       /* device dependent write      */
+    }
+
+  return(Rc);
+
+} /* RptWrite */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Close Report                                                       */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Close report writing to a device.                                  */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptClose(                       /* close report                */
+  tRcb *           Rcb                 /* i/  - report control block  */
+  )
+
+{
+
+  if ((Rcb == NULLP)
+    || (memcmp(Rcb->Eyecatch, RcbEye, sizeof(tEyecatch)) != 0))
+    {
+    return(RptErrorBadRCB);
+    }
+
+  if (Rcb->Rdr.Close != NULLP)
+    {
+    (*Rcb->Rdr.Close)(Rcb);            /* device dependent close      */
+    }
+
+  if ((Rcb->StringPool != NULLP)       /* free storage                */
+    && (stgretn(Rcb->StgQ, Rcb->PoolSize, Rcb->StringPool) != 0)
+    && (stgretn(Rcb->StgQ, sizeof(Rcb), Rcb) != 0))
+    {
+    Rcb->Rcs |= RcsRcbError;           /* trouble                     */
+    return(RptErrorStgretn);
+    }
+
+  return(0);                           /* closed                      */
+
+} /* RptClose */
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Snap storage.                                                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* Snap a storage area.                                               */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+tRptRc RptSnap(
+  tRcb *           Rcb,                /* i/  - report control block  */
+  char *           Title,              /* i/  - snap title            */
+  int              Length,             /* i/  - snap length           */
+  void *           Address             /* i/  - snap address          */
+  )
+
+{
+
+  tRptRc           RptRc;              /* return code                 */
+  long             Lines;              /* number of full snap lines   */
+  long             DupLines;           /* lines of duplicate contents */
+  long             Fullwords;          /* remaining fullword groupings*/
+  long             Bytes;              /* remaining group's bytes     */
+  long             DupBytes;           /* bytes of duplicate contents */
+  long             PadBlanks;          /* number pad blanks           */
+  long             LastDisplayLength;  /* last display string's length*/
+  char *           WorkAddress;        /* incrementing address        */
+  char *           LastAddress;        /* last snap line's address    */
+  char             WorkBufferí10ù;     /* work buffer                 */
+  char             LastLineí80ù;       /* last line work buffer       */
+  char             DisplayStringí17ù;  /* conversion work area        */
+  tRcf             Rcf;                /* flag preservation area      */
+
+  if (Length <= 0)                     /* valid length ?              */
+    {
+    return(RptErrorBadSnapLen);        /* no, error                   */
+    }
+
+  WorkAddress = (char *)Address;       /* create incrementing copy    */
+
+  /*
+  ** Write snap header.
+  */
+
+  Rcf = Rcb->Rcf;                      /* protect application's flags */
+  Rcb->Rcf |=                          /* this routine's flags        */
+    (RcfSpaceInCall | RcfGroupInCall);
+
+  if ((Title != NULLP)
+    && ((RptRc = RptWrite(Rcb, 2, 4, "%s", Title)) != 0))
+    {
+    Rcb->Rcf = Rcf;                    /* restore application's flags */
+    return(RptRc);
+    }
+
+  if ((RptRc = RptWrite(Rcb, 1, 1, "Address  Offset   Data")) != 0)
+    {
+    Rcb->Rcf = Rcf;                    /* restore application's flags */
+    return(RptRc);
+    }
+
+  /*
+  ** Write full snap-detail lines.
+  */
+
+  Lines  = Length / 16;                /* number of 4-fullword lines  */
+  Fullwords = (Length % 16) / 4;       /* remaining fullword groups   */
+  Bytes = Length % 4;                  /* remaining bytes             */
+
+  for( ; Lines-- > 0; WorkAddress += 16)
+    {
+    if ((RptRc = RptWrite(Rcb, 1, 1,
+      "%08X %08X %08X %08X %08X %08X *%-16.16s*",
+      (long)WorkAddress,
+      (long)(WorkAddress - (char *) Address),
+      (*(long *)(WorkAddress)),
+      (*(long *)(WorkAddress + 4)),
+      (*(long *)(WorkAddress + 8)),
+      (*(long *)(WorkAddress + 12)),
+      toprintstr(DisplayString, WorkAddress, 16))) != 0)
+      {
+      Rcb->Rcf = Rcf;                  /* restore application's flags */
+      return(RptRc);
+      }
+
+    /* identify contiguous lines of identical storage values */
+    for (DupBytes = 16, DupLines = Lines;
+      ((DupLines-- > 0)
+      && (memcmp(WorkAddress, WorkAddress + DupBytes, 16) == 0));
+      DupBytes += 16)
+      {
+      ;
+      }
+
+    if ((DupLines + 1) < Lines)        /* identical contents ?        */
+      {
+      if ((RptRc = RptWrite(Rcb, 1, 1,
+        "  Contents of %08X through %08X same as line above.",
+        (long)(WorkAddress + 16),
+        (long)(WorkAddress + DupBytes))) != 0)
+        {
+        Rcb->Rcf = Rcf;                /* restore application's flags */
+        return(RptRc);
+        }
+      WorkAddress += (DupBytes - 16);  /* adjust address and lines    */
+      Lines = DupLines + 1;
+      }
+    } /* for( ; Lines-- > 0 ... */
+
+  /*
+  ** Write partial snap-detail line.
+  */
+
+  if ((Fullwords > 0) | (Bytes > 0))
+    {
+    PadBlanks = (4 - Fullwords) * 9 - Bytes * 2;
+    LastDisplayLength = Fullwords * 4 + Bytes;
+
+    /* address and offset */
+    sprintf(LastLine, "%08X %08X ",
+      (long)WorkAddress, (long)(WorkAddress - (char *) Address));
+
+    LastAddress = WorkAddress;
+
+    /* remaining fullword groupings */
+    for (;Fullwords > 0; Fullwords--, WorkAddress += 4)
+      {
+      sprintf(WorkBuffer, "%08X ", *((long *)WorkAddress));
+      strcat(LastLine, WorkBuffer);
+      }
+
+    /* incomplete fullword group */
+    for (;Bytes > 0; Bytes--, WorkAddress++)
+      {
+      sprintf(WorkBuffer, "%02X", (long)(*WorkAddress));
+      strcat(LastLine, WorkBuffer);
+      }
+
+    /* blank padding and character representation */
+    if ((RptRc = RptWrite(Rcb, 1, 1, "%s%-*.s*%-16.16s*",
+      LastLine, PadBlanks, " ",
+      toprintstr(DisplayString, LastAddress, LastDisplayLength))) != 0)
+      {
+      Rcb->Rcf = Rcf;                  /* restore application's flags */
+      return(RptRc);
+      }
+    }
+
+  /*
+  ** Write snap trailer.
+  */
+
+  RptRc = RptWrite(Rcb, 1, 1, "End of snap");
+
+  Rcb->Rcf = Rcf;                    /* restore application's flags */
+
+  return(RptRc);
+
+} /* RptSnap */
+
+/*--------------------------------------------------------------------*/
+/* convert supplied input storage of supplied length to a printable   */
+/* string and place it in the supplied output buffer.                 */
+/*--------------------------------------------------------------------*/
+
+static char * toprintstr(
+  char * Out,
+  char * In,
+  int Length
+  )
+
+{
+
+  int              Index;
+
+  for (Index = 0; Index < Length; Index ++)
+    {
+    OutíIndexù = (isprint(IníIndexù) ? IníIndexù : '.');
+    }
+
+  OutíIndexù = '\0';
+
+  return(Out);
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Convert option string to option values.                            */
+/*--------------------------------------------------------------------*/
+
+int RptSetOptions(
+  char *           Ros,                /* i/  - report option string  */
+  tRov *           Rov,                /* i/o - report option values  */
+  char *           Msg                 /* i/o - error message buffer  */
+  )
+
+{
+
+  char             ErrorMsgBufferí32ù; /* cmdscan error msg buffer    */
+  int              Rc;                 /* return code                 */
+
+/*
+  "DEFAULTS(string)"
+  "OVRRIDES(string)"
+
+  "LINES(55) WIDTH(80) MINWIDTH(80) BREAK SPACE GROUP SPCCALL GRPCALL"
+  "MINLINES(?)"
+
+  LINES(#)     - lines per page
+  WIDTH()      - characters per line
+  PAGEID(#)    - header line containing page number (0-?)
+  LASTHDR(#)   - last header line # (0-?)
+  MINWIDTH(#)  - minumum number of characters per line
+  MINLINES(#)  - minumum number of lines per page
+  NOHDR        - do not print headers
+  NUMBER       - expect to number pages
+  BREAK        - break on implicit page breaks
+  NOSPC        - suppress line spacing
+  NOGRP        - suppress line groupings
+  SPCCALL      - write call has line spacing parameter
+  GRPCALL      - write call has line grouping parammeter
+
+*/
+
+/*
+** Report keyword ids.
+*/
+
+#define RsoLines      1
+#define RsoWidth      2
+#define RsoPageId     3
+#define RsoLastHdrId  4
+#define RsoMinWidth   5
+#define RsoMinLines   6
+#define RsoNoHeaders  7
+#define RsoBreak      8
+#define RsoSpace      9
+#define RsoGroup     10
+#define RsoSpcCall   11
+#define RsoGrpCall   12
+#define RsoNumber    13
+#define RsoKeywordCount 13
+
+ /*
+ ** Default keyword values.
+ */
+
+ static const char DefLinesPerPageíù = "55";
+ static const char DefLineLengthíù = "80";
+ static const char DefPageLineIdíù = "1";
+ static const char DefLastHeaderIdíù = "4";
+ static const char DefMinWidthíù = "80";
+ static const char DefMinLinesíù = "10";
+
+  /*
+  ** Keyword table.
+  */
+
+  static const struct keytab RokTableíù =
+    {
+    KEYE("LINES",    1, 1, RsoLines,     NUMERIC),
+    KEYE("WIDTH",    1, 1, RsoWidth,     NUMERIC),
+    KEYE("PAGEID",   1, 1, RsoPageId,    NUMERIC),
+    KEYE("LASTHDR",  1, 1, RsoLastHdrId, NUMERIC),
+    KEYE("MINWIDTH", 1, 1, RsoMinWidth,  NUMERIC),
+    KEYE("MINLINES", 1, 1, RsoMinLines,  NUMERIC),
+    KEYE("NOHDR",    0, 0, RsoNoHeaders, NOTYPE),
+    KEYE("NUMBER",   0, 0, RsoNumber,    NOTYPE),
+    KEYE("BREAK",    0, 0, RsoBreak,     NOTYPE),
+    KEYE("NOSPC",    0, 0, RsoSpace,     NOTYPE),
+    KEYE("NOGRP",    0, 0, RsoGroup,     NOTYPE),
+    KEYE("SPCCALL",  0, 0, RsoSpcCall,   NOTYPE),
+    KEYE("GRPCALL",  0, 0, RsoGrpCall,   NOTYPE),
+    KEYENULL
+    };
+
+  /*
+  ** Postops table.
+  */
+
+  static const struct postops RopTableíù =
+    {
+    {RsoLines, offsetof(tRov, LinesPerPage), sizeof(tLines),
+       1, 0, 0, sizeof(DefLinesPerPage) - 1, &DefLinesPerPageí0ù},
+
+    {RsoWidth, offsetof(tRov, LineLength), sizeof(tLineLength),
+       1, 0, 0, sizeof(DefLineLength) - 1, &DefLineLengthí0ù},
+
+    {RsoPageId, offsetof(tRov, PageLineId), sizeof(tLines),
+       1, 0, 0, sizeof(DefPageLineId) - 1, &DefPageLineIdí0ù},
+
+    {RsoLastHdrId, offsetof(tRov, LastHeaderId), sizeof(tLines),
+       1, 0, 0, sizeof(DefLastHeaderId) - 1, &DefLastHeaderIdí0ù},
+
+    {RsoMinWidth, offsetof(tRov, MinWidth), sizeof(tLineLength),
+       1, 0, 0, sizeof(DefMinWidth) - 1, &DefMinWidthí0ù},
+
+    {RsoMinLines, offsetof(tRov, MinLines), sizeof(tLines),
+       1, 0, 0, sizeof(DefMinLines) - 1, &DefMinLinesí0ù},
+
+    {RsoNoHeaders, offsetof(tRov, Rfo), sizeof(tRfo),
+       0, RfoNoHeaders, SET, 0, 0},
+
+    {RsoNumber, offsetof(tRov, Rfo), sizeof(tRfo),
+       0, RfoPageNumber, SET, 0, 0},
+
+    {RsoBreak, offsetof(tRov, Rfo), sizeof(tRfo),
+       0, RfoPageBreak, SET, 0, 0},
+
+    {RsoSpace, offsetof(tRov, Rfo), sizeof(tRfo),
+       0, RfoSpaceSuppress, SET, 0, 0},
+
+    {RsoGroup, offsetof(tRov, Rfo), sizeof(tRfo),
+       0, RfoGroupSuppress, SET, 0, 0},
+
+    {RsoSpcCall, offsetof(tRov, Rcf), sizeof(tRcf),
+       0, RcfSpaceInCall, SET, 0, 0},
+
+    {RsoGrpCall, offsetof(tRov, Rcf), sizeof(tRcf),
+       0, RcfGroupInCall, SET, 0, 0},
+
+    {0, 0, 0, 0, 0, 0, 0, 0}
+    };
+
+  Rc = CmdScanPost(                   /* scan and post command values */
+    (struct keytab *)RokTable,        /* i/  - keyword table          */
+    RsoKeywordCount,                  /* i/  - keyword table entries  */
+    (struct postops *)RopTable,       /* i/  - operand post control   */
+    Ros,                              /* i/  - string to process      */
+    Rov,                              /* i/  - control block to post  */
+    ErrorMsgBuffer                    /* i/  - error message buffer   */
+    );
+
+  if (Rc != 0)
+    {
+    sprintf(Msg,
+      "Report option keyword error: %s",
+      ErrorMsgBuffer);
+    return(RptErrorOptions);
+    }
+
+  if (Rov->LinesPerPage < Rov->MinLines)
+    {
+    sprintf(Msg,
+      "%d lines per page is less than the required minimum of %d",
+      Rov->LinesPerPage, Rov->MinLines);
+    return(RptErrorOptions);
+    }
+
+   if (Rov->LineLength < Rov->MinWidth)
+    {
+    sprintf(Msg,
+      "%d characters per line is less than the required minimum of %d",
+      Rov->LineLength, Rov->MinWidth);
+    return(RptErrorOptions);
+    }
+
+  return(0);
+
+}

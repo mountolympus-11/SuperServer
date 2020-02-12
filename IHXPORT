@@ -1,0 +1,1700 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/*<DOC-ON>*************************************************************
+*                                                                     *
+*  Module: IHXPORT - Host Xport Communication Services                *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*    This module contains a set of functions used to support          *
+*    the host server side of an Xport Comminication session.          *
+*    The communication method (protocol) used to manage the           *
+*    Xport session is independ of this set of services.  The          *
+*    Xport profile table defines the set of options and externally    *
+*    callable functions to support unique protocol requirements.      *
+*    The protocol Driver calls the following external functions       *
+*    manage and format the data received and to be sent.              *
+*                                                                     *
+*                                                                     *
+*  External Functions:                                                *
+*                                                                     *
+*    hxpinit  - Initialize Xport Session block                        *
+*    hxpaval  - Notify Client of Available status                     *
+*    hxprecv  - Process received buffer for PLU session               *
+*    hxpsend  - Send req/resp to client logical session               *
+*                                                                     *
+*  Internal Functions:                                                *
+*                                                                     *
+*    recvdata - receive and queue converse data                       *
+*    senddata - Select and send next available packet                 *
+*    sendbufr - Send buffer to client session                         *
+*    avail    - Send Session Available status                         *
+*    newsess  - Create new application session                        *
+*    killsess - Terminate Client Application session                  *
+*    dropsess - Terminate logical session                             *
+*    ping     - Reply to client ping request                          *
+*    logoff   - Terminate Client Session                              *
+*    locsess  - Locate appl and logical session blocks                *
+*    status   - Set status information is psess                       *
+*    errmsg   - Return Error msg associated w/ errcode                *
+*    htrace   - Xport header trace                                    *
+*    rtrace   - Xport request trace                                   *
+*    dtrace   - Xport data trace                                      *
+*                                                                     *
+*                                                                     *
+**<DOC-OFF>************************************************************
+*                                                                     *
+*  Maintenance:                                                       *
+*                                                                     *
+*     07/12/94 R. Colmone            Par# 134222                      *
+*                                                                     *
+*        Added support to Xport for LU 6.2 communication protocol.    *
+*        This included removing any $SESS dependencies and placing    *
+*        either the Driver or Profile table routines.  The initial    *
+*        Avail status message was removed from the HXPinit function   *
+*        and made to be externally callable.                          *
+*                                                                     *
+**********************************************************************/
+
+#include <stdlib.h>
+#include <string.h>
+#include <stddef.h>
+#include "env.h"
+#include "equs.h"
+#include "msg.h"
+#include "cloak.h"
+#include "squish.h"
+#include "stgmgr.h"
+#include "procsrv.h"
+#include "sess.h"
+#include "hxpschd.h"
+#include "hxpprof.h"
+#include "hxport.h"
+#include "hxpcbm.h"
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxpinit - Initialize Xport Session block                 *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function performs the xport session initialize. This       *
+*     includes the completion of the psess initialization by          *
+*     locating the profile entry and xport header format              *
+*     definitions.  When initialization is complete,  the             *
+*     initial AVAIL packet is sent to the client session.             *
+*                                                                     *
+*  Parameters: ptr to psess structure                                 *
+*              ptr to xprofhdr structure                              *
+*                                                                     *
+*  Returns:    HXP_OK   - Initialization successful                   *
+*              HXP_FAIL - Initialization failed                       *
+*                                                                     *
+**********************************************************************/
+
+int hxpinit( struct psess *ps, struct xprofhdr *xph ) {
+
+    MSGH msgh ;
+
+/*  ------------------------------------------------------------
+    Initialize message defaults
+    ------------------------------------------------------------ */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ------------------------------------------------------------
+    Locate Xport profile entry
+    ------------------------------------------------------------ */
+    if ( ! ( ps->prof = locxprof( xph, ps->profname, ps->lutype ) ) ) {
+        msg( &msgh, 10, 1, ps->profname, sizeof ps->profname ) ;
+        return ( status( ps, ERR_PROFILE ) ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Locate Xport Common header format
+    ------------------------------------------------------------ */
+    if ( ! ( ps->chdr = lochdfmt( xph, "COMMON" ) ) ) {
+        maddstr( msgh, "COMMON", 0 ) ;
+        msg( &msgh, 11, 0 ) ;
+        return ( status ( ps, ERR_PROFILE ) ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Locate Xport Device header format
+    ------------------------------------------------------------ */
+    if ( ! ( ps->dhdr = lochdfmt( xph, ps->prof->hdrtype ) ) ) {
+        maddstr( msgh, ps->prof->hdrtype, sizeof ps->prof->hdrtype ) ;
+        msg( &msgh, 11, 0 ) ;
+        return ( status( ps, ERR_PROFILE ) ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Initialize psess area
+    ------------------------------------------------------------ */
+    ps->commstate = READY ;
+    ps->state     = NORMAL ;
+    ps->seq       = 0 ;
+    ps->seqin     = 1 ;
+    ps->hdrlen    = ps->dhdr->hdrlen ;
+    ps->pfxlen    = ps->prof->fltovbl ;
+    ps->datalen   = ps->bufsize - ps->pfxlen - ps->hdrlen ;
+
+    if (ps->prof->ocloak)             /* If cloaking supportted, */
+        ps->datalen -= ps->hdrlen ;   /* account for cloaked hdr */
+
+    return ( status( ps, HXP_OK ) ) ;
+
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxpaval - Notify Client of Available status              *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This function is called to send an initial available           *
+*      status to the CLient session.                                  *
+*                                                                     *
+*  Parameters: ptr to psess structure                                 *
+*                                                                     *
+*  Returns:    HXP_OK   - Initialization successful                   *
+*              HXP_FAIL - Initialization failed                       *
+*                                                                     *
+**********************************************************************/
+
+int hxpaval( struct psess *ps ) {
+
+    int rc ;
+
+    rc = avail( ps ) ;
+
+    return ( status( ps, rc ) ) ;
+
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxprecv - Process received buffer for PLU session        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This function processes requests received on the PLU           *
+*      session.  Request can be in the format of a data packet,       *
+*      or special control information.  The request is analized       *
+*      by the the reqrtn specified in the profile entry.  If          *
+*      the request contains data, the data is passed through          *
+*      filter routine specified in the profile.  This allows          *
+*      any session specific data to be removed and the address        *
+*      and length of the packet data to be presented.                 *
+*                                                                     *
+*      Again, if the packet contains data, the packet header          *
+*      is now converted into the common xport header format.          *
+*      If the specified function indicates that data is being         *
+*      transported,  the function is called to receive, queue,        *
+*      and process the data.                                          *
+*                                                                     *
+*      Using the profile request formats,  the desired action         *
+*      is acquired and the appropriate function is called to          *
+*      process that action.                                           *
+*                                                                     *
+*  Parameters: ptr to psess structure                                 *
+*              ptr to received buffer                                 *
+*              len of received buffer                                 *
+*                                                                     *
+*  Returns:    HXP_OK   - received processing completed               *
+*                                                                     *
+**********************************************************************/
+
+int hxprecv( struct psess *ps, char *bufr, long bufrlen ) {
+
+    struct  xprofile *prof ;
+    struct  request  req ;
+    char    *clokbufr ;
+    int     rc = HXP_OK ;
+
+    prof      = ps->prof ;
+    ps->state = NORMAL ;
+
+/*  ------------------------------------------------------------
+    Initialize request block and obtain request method.
+    ------------------------------------------------------------ */
+    memset( &req, 0, sizeof req ) ;
+    req.data    = bufr ;
+    req.datalen = bufrlen ;
+
+    if ( ( ! prof->reqsel ) ÝÝ (prof->reqsel)( &req, ps->commblk ) )
+        return( status( ps, ERR_REQMETH ) ) ;
+
+/*  ------------------------------------------------------------
+    Strip transmission related info from packet
+    ------------------------------------------------------------ */
+    if ( prof->ifilter && req.method == FUNCTION ) {
+        if ( (prof->ifilter)( bufr, bufrlen, &req.rec, &req.reclen ) )
+            return( status( ps, ERR_FLTRTN ) ) ;
+    }
+    else {
+        req.rec    = bufr ;
+        req.reclen = bufrlen ;
+    }
+
+/*  ------------------------------------------------------------
+    If Standard Xport Function method, perform inbound cloak
+    as required and convert header to common format.
+    ------------------------------------------------------------ */
+    if ( req.method == FUNCTION ) {
+        if ( !( clokbufr = stgget( ps->xpqh, ps->hdrlen ) ) )
+            return( status( ps, ERR_STORAGE ) ) ;
+
+        if ( prof->icloak )
+            (prof->icloak)(req.rec, ps->hdrlen*2,
+                           clokbufr, ps->hdrlen, CLOAK_4BIT );
+        else
+            memcpy( clokbufr, req.rec, ps->hdrlen ) ;
+
+        rc = cnvhdfmt(ps->dhdr, ps->chdr, clokbufr, (char *) &ps->xhdr);
+        stgretn( ps->xpqh, ps->hdrlen, clokbufr ) ;
+
+        if ( ps->xhdr.attrs.enhcloak )
+            ps->enhcloak = TRUE ;
+
+        if ( rc )
+            return( status( ps, ERR_HDRCONV ) ) ;
+
+        req.methval = ps->xhdr.function ;
+        htrace( &ps->xhdr, ++ps->mid ) ;
+    }
+    else
+        rtrace( &req ) ;
+
+/*  ------------------------------------------------------------
+    Locate appropriate request format and associated action
+    ------------------------------------------------------------ */
+    if (  getactn( prof, &req ) )
+        return( status( ps, ERR_REQUEST ) ) ;
+
+    if ( ps->pend_bid && ps->commstate == READY )
+        req.action Ý= (RESP_CONV + RESP_AVAIL) ;
+
+/*  ------------------------------------------------------------
+    Process pending hostorder request if commstate is ready
+    ------------------------------------------------------------ */
+    if ( ps->pend_hostorder && ps->commstate == READY ) {
+
+        switch ( ps->pend_hostorder ) {
+
+            case PEND_NEWSESS :
+                rc = newsess( ps ) ;
+                break ;
+
+            case PEND_KILLSESS :
+                rc = killsess( ps ) ;
+                break ;
+
+            case PEND_DROPSESS :
+                rc = dropsess( ps ) ;
+                break ;
+
+            case PEND_PING :
+                rc = ping( ps ) ;
+                break ;
+
+            case PEND_LOGOFF :
+                rc = logoff( ps ) ;
+                break ;
+        }
+
+        ps->pend_hostorder = 0 ;
+
+        return( status( ps, rc ) ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Validate session sequence number.
+    ------------------------------------------------------------ */
+    if ( ( req.method == FUNCTION )         &&
+         ( ps->prof->seqno & SEQ_INOUT ) ) {
+        if ( ps->xhdr.seqindep ) {
+            if ( ps->xhdr.seq != ++ps->seqin )
+                rc = status( ps, ERR_SEQUENCE ) ;
+        }
+        else {
+            if ( ps->xhdr.seq != ++ps->seq )
+                rc = status( ps, ERR_SEQUENCE ) ;
+        }
+    }
+
+    if ( rc && ( ! ( req.action & RESP_PING ) ) )
+        return rc ;
+
+/*  ------------------------------------------------------------
+    If this is a converse function, format and queue receive in
+    progress.
+    ------------------------------------------------------------ */
+    if ( req.method  == FUNCTION && req.methval == CONVERSE )
+        if ( rc = recvdata( ps, &req ) )
+            return( status( ps, rc ) ) ;
+
+/*  ------------------------------------------------------------
+    Perform appropriate request/reply action.  If converse is
+    a valid response action, attempt to senddata first.
+    ------------------------------------------------------------ */
+    if      ( ( req.action & RESP_NSESS )   &&
+       (! ( rc = newsess( ps ) ) ) )
+        ;
+    else if ( ( req.action & RESP_KSESS )   &&
+       (! ( rc = killsess( ps ) ) ) )
+        ;
+    else if ( ( req.action & RESP_DROP  )   &&
+       (! ( rc = dropsess( ps ) ) ) )
+        ;
+    else if ( ( req.action & RESP_PING  )   &&
+       (! ( rc = ping( ps ) ) ) )
+        ;
+    else if ( ( req.action & RESP_LOGOFF )  &&
+       (! ( rc = logoff( ps ) ) ) )
+        ;
+
+    if ( req.action & RESP_CONV )
+        if ( ( rc = senddata( ps ) ) != HXP_WARN )
+            return( status( ps, rc ) ) ;
+
+    rc = HXP_OK ;
+
+    if ( req.action & RESP_AVAIL )
+       rc = avail( ps ) ;
+
+    return( status( ps, rc ) ) ;
+
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: hxpsend - Send req/resp to client logical session        *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will process a request to send a packet           *
+*     to a client logical session.  The request is compressed         *
+*     using the profile compression routine.  The request is          *
+*     then placed on the logical session send queue.  If the          *
+*     session is in a Ready-to-send state, the senddata routine       *
+*     is called to send the next available block of data.             *
+*                                                                     *
+*  Parameters: ptr to psess structure                                 *
+*              logical session handle                                 *
+*              ptr to message buffer                                  *
+*              len of message buffer                                  *
+*                                                                     *
+*  Returns:    HXP_OK      - Send processing completed                *
+*              ERR_STORAGE - Storage management error                 *
+*              ERR_INVAPPL - Invalid application session              *
+*              ERR_INVSESS - Invalid logical session                  *
+*                                                                     *
+**********************************************************************/
+
+int hxpsend( struct psess *ps, LSESH sesshndl, void *ntfyepb,
+             char *bufr, long bufrlen )      {
+
+    struct appl     *ap ;
+    struct lsess    *ls ;
+    struct qbufr    *qb ;
+    struct xprofile *prof ;
+
+    char  *cmprec, *rec ;
+    int   cmplen, reclen, rc ;
+    int   compressed = FALSE ;
+
+    LOCAL int (*ocompr)() ;
+
+    prof  = ps->prof ;
+
+/*  ------------------------------------------------------------
+    Locate appl and logical session blocks
+    ------------------------------------------------------------ */
+    if ( ! ( ap = locappl( sesshndl.applid, ps ) ) ) {
+        status( ps, ERR_INVAPPL ) ;
+        ps->errcode = 0 ;
+        return HXP_FAIL ;
+    }
+
+    if ( ! ( ls = loclsess( sesshndl, ap ) ) ) {
+        status( ps, ERR_INVSESS ) ;
+        ps->errcode = 0 ;
+        return HXP_FAIL ;
+    }
+
+/*  ------------------------------------------------------------
+    Compress record if compress routine available
+    ------------------------------------------------------------ */
+    rec    = bufr ;
+    reclen = bufrlen ;
+
+    dtrace( rec, reclen, 'O', ++ps->mid ) ;
+
+    if ( ocompr = prof->ocompr ) {
+        if ( ! ( cmprec = stgget( ps->xpqh, bufrlen ) ) )
+            return ( status( ps, ERR_STORAGE ) ) ;
+
+        if ( (cmplen =
+             (ocompr)(rec, reclen, cmprec, reclen, ps->sqlvl ) ) > 0) {
+            compressed = TRUE ;
+            rec    = cmprec ;
+            reclen = cmplen ;
+        }
+        else
+            stgretn( ps->xpqh, bufrlen, cmprec ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Alloc buffer and queue request to be sent.
+    ------------------------------------------------------------ */
+    if ( ! (qb = stgget( ps->xpqh, reclen + sizeof( struct qbufr )))) {
+        if ( compressed )
+            stgretn( ps->xpqh, bufrlen, cmprec ) ;
+        return ( status( ps, ERR_STORAGE ) ) ;
+    }
+
+    qb->ntfyepb      = ntfyepb ;
+    qb->attrs.phyrec = reclen ;
+    qb->attrs.logrec = bufrlen ;
+    qb->attrs.xmit   = 0 ;
+    qb->attrs.squish = compressed ;
+    qb->mid          = ps->mid ;
+    qb->length       = reclen + sizeof( struct qbufr ) ;
+
+    memcpy( qb->data, rec, reclen ) ;
+    enqueue( (void **) &ls->sendrecs, qb ) ;
+    ls->qsend++ ;
+
+/*  ------------------------------------------------------------
+    if request buffer was compressed,  free temporary buffer.
+    ------------------------------------------------------------ */
+    if ( compressed )
+        stgretn( ps->xpqh, bufrlen, cmprec ) ;
+
+/*  ------------------------------------------------------------
+    If the session is ready to send, then call routine to send
+    next buffer.
+    ------------------------------------------------------------ */
+    rc = HXP_OK ;
+
+    if (ps->commstate == READY)
+        rc = senddata( ps ) ;
+
+    return (status ( ps, rc ) );
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: recvdata - receive and queue converse data               *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This function will accumulate and format a converse            *
+*      data packet.  As converse data segments are received,          *
+*      the RU is reassembled.  When an entire RU is received,         *
+*      the data is process according to profile specifications        *
+*      and then passed over to the RU (transaction) scheduler.        *
+*                                                                     *
+*  Parameters:  Addr of psess                                         *
+*               Addr of request structure                             *
+*                                                                     *
+*  Returns:     HXP_OK      - Processing successful                   *
+*               ERR_STORAGE - Storage allocation error                *
+*               ERR_SEGMENT - Segmentation error                      *
+*               ERR_PROFILE - Profile violation                       *
+*               other <> 0  - RUsched failures                        *
+*                                                                     *
+**********************************************************************/
+
+int recvdata( struct psess *ps, struct request *req ) {
+
+    struct appl  *ap ;
+    struct lsess *ls ;
+    struct qbufr *qb ;
+    struct xpRecAttrs attrs ;
+
+    int    rc, len, reclen, buffallc, clbits ;
+    Uchar  seg, *dest, *src, *rec, *buff ;
+
+    LOCAL  int (*icloak)() ;
+    LOCAL  int (*icompr)() ;
+
+/*  ------------------------------------------------------------
+    Locate appl/lsess blocks assocaited with request
+    ------------------------------------------------------------ */
+    if ( rc = locsess( ps, &ap, &ls ) )
+        return rc ;
+
+/*  ------------------------------------------------------------
+    Initialize segment indicators
+    ------------------------------------------------------------ */
+    ap->xhdr = ps->xhdr ;
+    attrs    = ps->xhdr.attrs ;
+    seg      = attrs.segment ;
+
+/*  ------------------------------------------------------------
+    If first or only transmission then ensure that there is
+    currently no receive in progress.  If middle or last
+    transmission, then ensure that there is a receive in progress.
+    ------------------------------------------------------------ */
+    if ( seg != NONE )
+        if ( ( (seg & FIRST) &&  ls->recvcurr )   ÝÝ
+             (!(seg & FIRST) && !ls->recvcurr ) )
+            return ERR_SEGMENT ;
+
+    if ( seg & FIRST ) {
+        len = attrs.phyrec + sizeof( struct qbufr ) ;
+        if ( ! ( qb = stgget(ps->xpqh, len ) ) )
+            return ERR_STORAGE ;
+        else {
+            qb->length     = len   ;
+            qb->attrs      = attrs ;
+            qb->attrs.xmit = 0 ;
+            qb->mid        = ps->mid ;
+            enqueue( (void **) &ls->recvcurr, qb ) ;
+        }
+    }
+
+/*  ------------------------------------------------------------
+    Collect partial xmits and reblock in lsess staging area
+    ------------------------------------------------------------ */
+    if ( seg != NONE && ( len = attrs.xmit ) ) {
+        qb = ls->recvcurr ;
+
+        if ( (attrs.phyrec != qb->attrs.phyrec) ÝÝ
+             (attrs.logrec != qb->attrs.logrec) ÝÝ
+             (attrs.phyrec <  qb->attrs.xmit + len ) )
+            return ERR_SEGMENT ;
+
+        dest = qb->data + qb->attrs.xmit ;
+
+        if ( icloak = ps->prof->icloak )
+            src = req->rec + ( ps->hdrlen * 2 ) ;
+        else
+            src = req->rec + ps->hdrlen ;
+
+        memcpy( dest, src, len ) ;
+
+        qb->attrs.xmit += len ;
+    }
+
+/*  ------------------------------------------------------------
+    If end-of-chain, validate that all segments are received
+    ------------------------------------------------------------ */
+    if ( seg & LAST ) {
+
+        if ( qb->attrs.xmit != qb->attrs.phyrec )
+            return ERR_SEGMENT ;
+
+/*  ------------------------------------------------------------
+    Chain accumulated,  perform inbound cloaking if necessary
+    ------------------------------------------------------------ */
+        if ( icloak ) {
+            clbits = ( ps->xhdr.attrs.enhcloak ) ?
+                     CLOAK_6BIT : CLOAK_4BIT ;
+            len = -((icloak)(qb->data, qb->attrs.phyrec, 0, 0, clbits));
+
+            if ( ! ( buff = stgget( ps->xpqh, len ) ) )
+                return ERR_STORAGE ;
+            buffallc = TRUE ;
+
+            (icloak)( qb->data, qb->attrs.phyrec, buff, len, clbits ) ;
+        }
+        else {
+            buffallc = FALSE ;
+            buff = qb->data  ;
+            len  = qb->attrs.phyrec ;
+        }
+
+/*  ------------------------------------------------------------
+    If data is in compressed format, call inbound compression rtn
+    ------------------------------------------------------------ */
+        reclen = qb->attrs.logrec ;
+        if ( ! ( rec = stgget( ps->xpqh, reclen ) ) )
+            return ERR_STORAGE ;
+
+        if ( qb->attrs.squish )
+            if ( icompr = ps->prof->icompr )
+                (icompr)( buff, len, rec, reclen ) ;
+            else
+                return ERR_PROFILE ;
+        else
+            memcpy( rec, buff, len ) ;
+
+        dtrace( rec, reclen, 'I', qb->mid ) ;
+
+/*  ------------------------------------------------------------
+    Remove current receive record from queue and free assoc stg.
+    ------------------------------------------------------------ */
+        dequeue( (void **) &ls->recvcurr, qb ) ;
+
+        stgretn( ps->xpqh, qb->length, qb ) ;
+
+        if ( buffallc )
+            stgretn( ps->xpqh, len, buff ) ;
+
+/*  ------------------------------------------------------------
+    RU successfully received,  schedule RU transaction.
+    ------------------------------------------------------------ */
+
+        rc = RUsched( ps, ls, rec, reclen ) ;
+
+        stgretn( ps->xpqh, reclen, rec ) ;
+
+        if ( rc )
+            return rc ;
+    }
+
+    return HXP_OK ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: senddata - Select and send next available packet         *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will select a buffer to be sent to the client     *
+*     session.  The logical session queues are processed for          *
+*     each application available within the physical session.         *
+*     If a buffer is available to send it is transfered from          *
+*     sendrecs queue to the sendcurr queue for the logical session.   *
+*     If the profile specifies an outbound cloaking routine,          *
+*     the sendcurr queue buffer is reallocated for the required       *
+*     cloaking size and the data is then cloaked.  If the packet      *
+*     requires multiple sends, it remains on the sendcurr queue       *
+*     until transmission is complete.  The xport header information   *
+*     is updated in the psess and the required data is send to        *
+*     the client session.                                             *
+*                                                                     *
+*  Parameters: Address of psess block                                 *
+*                                                                     *
+*  Returns:    HXP_OK       - Buffer successfully sent                *
+*              HXP_WARN     - No data ready to send                   *
+*              ERR_STORAGE  - Storage allocation failure              *
+*              ERR_CHAINING - Chaining Violation                      *
+*                                                                     *
+**********************************************************************/
+
+int senddata( struct psess *ps ) {
+
+    struct appl     *ap ;
+    struct lsess    *ls ;
+    struct xprofile *prof ;
+    struct qbufr    *qb, *nqb ;
+
+    char   *origin ;
+    int    len, totlen, xmitlen, rc, clbits ;
+
+    LOCAL  int (*ocloak)() ;
+
+    prof = ps->prof ;
+
+/*  ------------------------------------------------------------
+    If session communication state is not ready, then do not
+    attempt to locate data to be sent.
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY )
+        return HXP_WARN ;
+
+/*  ------------------------------------------------------------
+    Run the appl/lsess queues searching for lsess w/ req to send
+    ------------------------------------------------------------ */
+    qb = 0 ;
+
+    for ( ap = ps->appl ; ap && !qb ; ) {
+        for ( ls = ap->lsess ; ls && !qb ; ) {
+            if ( qb = ls->sendcurr )
+                ;
+            else if ( qb = ls->sendrecs ) {
+                dequeue( (void **) &ls->sendrecs, qb ) ;
+                enqueue( (void **) &ls->sendcurr, qb ) ;
+                ls->qsend-- ;
+            }
+            if ( !qb )
+                ls = ls->next ;
+        }
+        if ( !qb )
+            ap = ap->next ;
+    }
+
+    if ( !qb )
+        return HXP_WARN ;
+
+/*  ------------------------------------------------------------
+    If outbound cloaking required and not yet performed, then
+    allocate new buffer for required cloak size.
+    ------------------------------------------------------------ */
+    if ( (ocloak = prof->ocloak) && !qb->attrs.cloak ) {
+        clbits = ( ps->enhcloak ) ? CLOAK_6BIT : CLOAK_4BIT ;
+        len = -( (ocloak)( qb->data, qb->attrs.phyrec, 0, 0, clbits ) );
+        if (!(nqb = stgget(ps->xpqh, len + sizeof (struct qbufr))))
+            return ERR_STORAGE ;
+
+        nqb->length       = len + sizeof(struct qbufr) ;
+        nqb->attrs.phyrec = len ;
+        nqb->attrs.logrec = qb->attrs.logrec ;
+        nqb->attrs.xmit   = 0 ;
+        nqb->attrs.squish = qb->attrs.squish ;
+        nqb->mid          = qb->mid ;
+        nqb->attrs.cloak  = TRUE ;
+        nqb->ntfyepb      = qb->ntfyepb ;
+
+        (ocloak)( qb->data, qb->attrs.phyrec, nqb->data, len, clbits) ;
+
+        dequeue( (void **) &ls->sendcurr, qb  ) ;
+        enqueue( (void **) &ls->sendcurr, nqb ) ;
+
+        stgretn( ps->xpqh, qb->length, qb ) ;
+        qb = nqb ;
+    }
+
+/*  ------------------------------------------------------------
+    Calc origin / length of data to xmit
+    ------------------------------------------------------------ */
+    if ( qb->attrs.xmit >= qb->attrs.phyrec ) {
+        dequeue( (void **) &ls->sendcurr, qb ) ;
+        stgretn( ps->xpqh, qb->length, qb ) ;
+        return HXP_WARN ;
+    }
+
+    origin  = qb->data + qb->attrs.xmit ;
+    totlen  = qb->attrs.phyrec - qb->attrs.xmit ;
+    xmitlen = ( totlen < ps->datalen ) ? totlen : ps->datalen ;
+
+/*  ------------------------------------------------------------
+    Update transimission buffer attributes
+    ------------------------------------------------------------ */
+    if ( ! prof->chaining && ( xmitlen < ps->datalen ) )
+        return ERR_CHAINING ;
+
+    qb->attrs.segment  = NONE ;
+    if ( qb->attrs.xmit == 0 )
+        qb->attrs.segment Ý= FIRST ;
+
+    if ( qb->attrs.phyrec == (qb->attrs.xmit + xmitlen ) )
+        qb->attrs.segment Ý= LAST ;
+    else
+        if ( qb->attrs.xmit )
+            qb->attrs.segment Ý=MIDDLE ;
+
+    qb->attrs.xmit += xmitlen ;
+
+/*  ------------------------------------------------------------
+    Reset Xport header information for subsequent converse
+    ------------------------------------------------------------ */
+    ps->xhdr.function   = CONVERSE ;
+    ps->xhdr.applid     = ls->sesshndl.applid ;
+    ps->xhdr.lsessid    = ls->sesshndl.lsessid ;
+    ps->xhdr.originator = HOSTMSG ;
+    ps->xhdr.rc         = ACK ;
+    ps->xhdr.rsn        = 0 ;
+    ps->xhdr.seq        = ++ps->seq ;
+    ps->xhdr.attrs      = qb->attrs ;
+    ps->xhdr.attrs.xmit = xmitlen ;
+
+/*  ------------------------------------------------------------
+    Send buffer and dequeue when complete
+    ------------------------------------------------------------ */
+    rc = sendbufr( ps, origin, xmitlen, qb->mid ) ;
+
+    if ( qb->attrs.xmit >= qb->attrs.phyrec ) {
+
+        if ( qb->ntfyepb )
+            epbpost( (int) qb->ntfyepb, rc ) ;
+
+        dequeue( (void **) &ls->sendcurr, qb ) ;
+        stgretn( ps->xpqh, qb->length, qb ) ;
+    }
+
+    return rc ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: sendbufr - Send buffer to client session                 *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will complete the formatting process of           *
+*     the transmission packet.  The xport header will be              *
+*     converted to the session format and cloaked if required.        *
+*     The packet will then be assembled with the xport header         *
+*     and passed through the outbound filter routine if specified     *
+*     by the associated profile entry.  The data is then              *
+*     passed to the $SESS API via the sess function.                  *
+*                                                                     *
+*  Parameters: Address of psess block                                 *
+*              Address of data to transmit                            *
+*              length  of data to transmit                            *
+*                                                                     *
+**********************************************************************/
+
+int sendbufr( struct psess *ps, char *rec, int reclen, Ushort id ) {
+
+    char *hdr, *aux, *xmit ;
+    int  hdrlen, auxlen, xmitlen, rc, i ;
+
+    LOCAL int (*ocloak)() ;
+    LOCAL int (*ofilter)() ;
+    LOCAL int (*commreq)() ;
+
+/*  ------------------------------------------------------------
+    Convert common header to client header format
+    ------------------------------------------------------------ */
+    ps->xhdr.attrs.enhcloak = ps->enhcloak ;
+
+    htrace( &ps->xhdr, id ) ;
+
+    if ( ! (hdr = stgget( ps->xpqh, hdrlen = ps->hdrlen ) ) )
+        return ERR_STORAGE ;
+
+    if ( cnvhdfmt(ps->chdr, ps->dhdr, (char *) &ps->xhdr, hdr) ) {
+        stgretn( ps->xpqh, hdrlen, hdr ) ;
+        return ERR_HDRCONV ;
+    }
+
+/*  ------------------------------------------------------------
+    Allocate temporary area and construct transmission packet
+    ------------------------------------------------------------ */
+    if ( ocloak = ps->prof->ocloak )
+        auxlen  = reclen + (hdrlen * 2) ;
+    else
+        auxlen  = reclen + hdrlen ;
+
+    if ( ! (aux = stgget( ps->xpqh, auxlen ) ) ) {
+        stgretn( ps->xpqh, hdrlen, hdr ) ;
+        return ERR_STORAGE ;
+    }
+
+    if ( ocloak )
+        i = (ocloak)( hdr, hdrlen, aux, auxlen, CLOAK_4BIT ) ;
+    else
+        memcpy( aux, hdr, i = hdrlen ) ;
+
+    stgretn( ps->xpqh, hdrlen, hdr ) ;
+
+    if ( reclen )
+        memcpy( aux + i , rec, reclen ) ;
+
+/*  ------------------------------------------------------------
+    If outbound data filter routine specified, then
+    allocate new buffer including length required for filter
+    routine packet overhead.
+    ------------------------------------------------------------ */
+    if ( ofilter = ps->prof->ofilter ) {
+        xmitlen = auxlen + ps->prof->fltovtl ;
+        if ( ! ( xmit = stgget( ps->xpqh, xmitlen ) ) ) {
+            stgretn( ps->xpqh, auxlen, aux ) ;
+            return ERR_STORAGE ;
+        }
+        (ofilter)( aux, auxlen, xmit, xmitlen ) ;
+        stgretn( ps->xpqh, auxlen, aux ) ;
+    }
+    else {
+        xmit    = aux ;
+        xmitlen = auxlen ;
+    }
+
+/*  ------------------------------------------------------------
+    Send Data packet to client session
+    ------------------------------------------------------------ */
+    commreq = ps->prof->commreq ;
+    rc = (commreq)( ps, SEND_DATA, xmit, xmitlen ) ;
+
+    stgretn( ps->xpqh, xmitlen, xmit ) ;
+
+    ps->pend_bid = FALSE ;
+
+    if ( rc )
+        return ERR_SESSION ;
+    else
+        if ( ps->prof->duplex == HALF )
+            ps->commstate = BUSY ;
+
+    return HXP_OK ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: avail - Send Session Available status                    *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will respond to the client with a line            *
+*     turn around.  This packet format is sent in response            *
+*     to a bid function when no other data packets are available.     *
+*                                                                     *
+*  Parameters: Address of psess block                                 *
+*                                                                     *
+*  Returns:    HXP_OK       - Avail status successfully sent          *
+*              ERR_RPLYMETH - Invalid reply method specified          *
+*              <other>      - sendbufr return codes                   *
+*                                                                     *
+**********************************************************************/
+
+int avail( struct psess *ps ) {
+
+    struct xprepfmt *fmt ;
+
+/*  ------------------------------------------------------------
+    If session communication state is not ready, then indicate
+    that a BID reply is pending.
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_bid = TRUE ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Verify proper response method and send avail response.
+    ------------------------------------------------------------ */
+    fmt = ps->prof->xprep ;
+    if ( fmt->avail.method != FUNCTION )
+        return ERR_RPLYMETH ;
+
+    ps->xhdr.function   = fmt->avail.methval ;
+    ps->xhdr.applid     = 0 ;
+    ps->xhdr.lsessid    = 0 ;
+    ps->xhdr.originator = HOSTMSG ;
+    ps->xhdr.rc         = ACK ;
+    ps->xhdr.rsn        = 0 ;
+    ps->xhdr.seq        = ++ps->seq ;
+    memset( &ps->xhdr.attrs, 0, sizeof (struct xpRecAttrs) ) ;
+
+    return ( sendbufr( ps, 0, 0, ++ps->mid ) ) ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: newsess - Create new application session                 *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*      This function if performed when a new application session      *
+*      is requested with the phyical session.  A check is             *
+*      initially performed to verify if the session already           *
+*      exists.  If not, a new appl block is allocated and             *
+*      and associated user process is created.  A response to         *
+*      the host order is then issued to the client.                   *
+*                                                                     *
+*  Parameters: Address of psess block                                 *
+*                                                                     *
+*  Return:     HXP_OK       - New application session created         *
+*              ERR_INVAPPL  - Application session already exists      *
+*              ERR_RPLYMETH - Invalid reply method for newsess        *
+*                                                                     *
+**********************************************************************/
+
+int newsess( struct psess *ps ) {
+
+    struct appl     *ap ;
+    struct xprepfmt *fmt ;
+
+    int  rc, stat ;
+
+    fmt = ps->prof->xprep ;
+
+/*  ------------------------------------------------------------
+    If session is not ready to send, Indicate Pending hostorder
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_hostorder = PEND_NEWSESS ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Allocate new Appl block
+    ------------------------------------------------------------ */
+    if ( ap = locappl( ps->xhdr.applid, ps ) )
+        rc = ERR_INVAPPL ;
+    else
+        ap = newappl( ps, ps->xhdr.applid, &rc ) ;
+
+/*  ------------------------------------------------------------
+    If appl successfully added,  create user process
+    ------------------------------------------------------------ */
+    if ( ! rc )
+        rc = addUSER( ap ) ;
+
+/*  ------------------------------------------------------------
+    Notify client of newsess completion status
+    ------------------------------------------------------------ */
+    if ( fmt->newsess.method != FUNCTION )
+        return ERR_RPLYMETH ;
+
+    ps->xhdr.function    = fmt->newsess.methval ;
+    ps->xhdr.originator  = HOSTMSG ;
+    ps->xhdr.rc          = ( rc ) ? HXP_FAIL : HXP_OK ;
+    ps->xhdr.pingenabled = TRUE ;
+    ps->sqlvl = ( ps->xhdr.enhsquish > LEVEL2 ) ?
+                 LEVEL2 : ps->xhdr.enhsquish ;
+    ps->xhdr.enhsquish   = ps->sqlvl ;
+
+    if ( ! ( ps->xhdr.rsn = rc ) ) {
+        switch ( ps->lutype ) {
+            case LUTYPE_0:
+                ps->xhdr.rsn = RSN04 ;
+                break ;
+
+            case LUTYPE_2:
+                ps->xhdr.rsn = RSN08 ;
+                break ;
+
+            case LUTYPE_62:
+                ps->xhdr.rsn = RSN12 ;
+                break ;
+        }
+    }
+
+    ps->xhdr.seq        = ++ps->seq ;
+    memset( &ps->xhdr.attrs, 0, sizeof (struct xpRecAttrs) ) ;
+
+    stat = sendbufr( ps, 0, 0, ++ps->mid ) ;
+    return ( (stat) ? stat : rc ) ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: killsess - Terminate Client Application session          *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will terminate the application session            *
+*     created via a newsess hostorder.  If the appl block             *
+*     is successfully located, the user process is terminated         *
+*     and the appl is delete.  A response to the killsess             *
+*     host order is then issued to the client.                        *
+*                                                                     *
+*  Parameters:  Address of psess block                                *
+*                                                                     *
+*  Returns:     HXP_OK       - Application session terminated         *
+*               ERR_INVAPPL  - Application session not located        *
+*               ERR_RPLYMETH - Invalid reply method for killsess      *
+*                                                                     *
+**********************************************************************/
+
+int killsess( struct psess *ps ) {
+
+    struct appl     *ap ;
+    struct xprepfmt *fmt ;
+
+    int  stat, rc = 0 ;
+
+    fmt = ps->prof->xprep ;
+
+/*  ------------------------------------------------------------
+    If session is not ready to send, Indicate Pending hostorder
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_hostorder = PEND_KILLSESS ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Locate application block and delete user process and appl
+    block if appl successfully located.
+    ------------------------------------------------------------ */
+    if ( ap = locappl( ps->xhdr.applid, ps ) ) {
+        rc = delUSER( ap ) ;
+        delappl( ap, ps ) ;
+    }
+    else
+        rc = ERR_INVAPPL ;
+
+/*  ------------------------------------------------------------
+    Notify client of killsess completion status
+    ------------------------------------------------------------ */
+    if ( fmt->killsess.method != FUNCTION )
+        return ERR_RPLYMETH ;
+
+    ps->xhdr.function   = fmt->killsess.methval ;
+    ps->xhdr.originator = HOSTMSG ;
+    ps->xhdr.rc         = ( rc ) ? HXP_FAIL : HXP_OK ;
+    ps->xhdr.rsn        = rc ;
+    ps->xhdr.seq        = ++ps->seq ;
+    memset( &ps->xhdr.attrs, 0, sizeof (struct xpRecAttrs) ) ;
+
+    stat = sendbufr( ps, 0, 0, ++ps->mid ) ;
+    return ( (stat) ? stat : rc ) ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: dropsess - Terminate logical session                     *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will terminate the logical session                *
+*     created when the initial request for a new lsess was            *
+*     received.  This hostorder is initiated when the client          *
+*     session issue an XPCLOS on a logical session.  The lsess,       *
+*     if located, is deleted and a response to the hostorder          *
+*     is then issued to the client.                                   *
+*                                                                     *
+*  Parameters:  Address of psess block                                *
+*                                                                     *
+*  Returns:     HXP_OK       - Application session terminated         *
+*               ERR_INVAPPL  - Application session not located        *
+*               ERR_INVSESS  - Application session not located        *
+*               ERR_RPLYMETH - Invalid reply method for killsess      *
+*                                                                     *
+**********************************************************************/
+
+int dropsess( struct psess *ps ) {
+
+    struct appl     *ap ;
+    struct lsess    *ls ;
+    struct xprepfmt *fmt ;
+
+    LSESH  sesshndl ;
+
+    int  stat, rc = 0 ;
+
+    fmt = ps->prof->xprep ;
+
+/*  ------------------------------------------------------------
+    If session is not ready to send, Indicate Pending hostorder
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_hostorder = PEND_DROPSESS ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Locate and delete logical session handle
+    ------------------------------------------------------------ */
+    if ( ! ( ap = locappl( ps->xhdr.applid, ps ) ) )
+        rc = ERR_INVAPPL ;
+    else {
+        sesshndl.applid  = ps->xhdr.applid ;
+        sesshndl.lsessid = ps->xhdr.lsessid ;
+        if ( ls = loclsess( sesshndl, ap ) )
+            dellsess( ls, ap ) ;
+    }
+
+/*  ------------------------------------------------------------
+    Notify client of dropsess completion status
+    ------------------------------------------------------------ */
+    if ( fmt->drop.method != FUNCTION )
+        return ERR_RPLYMETH ;
+
+    ps->xhdr.function   = fmt->drop.methval ;
+    ps->xhdr.originator = HOSTMSG ;
+    ps->xhdr.rc         = ( rc ) ? HXP_FAIL : HXP_OK ;
+    ps->xhdr.rsn        = rc ;
+    ps->xhdr.seq        = ++ps->seq ;
+    memset( &ps->xhdr.attrs, 0, sizeof (struct xpRecAttrs) ) ;
+
+    stat = sendbufr( ps, 0, 0, ++ps->mid ) ;
+    return ( (stat) ? stat : rc ) ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: ping - Reply to client ping request                      *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*                                                                     *
+*  Parameters:  Address of psess block                                *
+*                                                                     *
+*  Returns:     HXP_OK       - Application session terminated         *
+*               ERR_RPLYMETH - Invalid reply method for killsess      *
+*                                                                     *
+**********************************************************************/
+
+int ping( struct psess *ps ) {
+
+    struct xprepfmt *fmt ;
+
+    fmt = ps->prof->xprep ;
+
+/*  ------------------------------------------------------------
+    If session is not ready to send, Indicate Pending hostorder
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_hostorder = PEND_PING ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Notify client of dropsess completion status
+    ------------------------------------------------------------ */
+    if ( fmt->drop.method != FUNCTION )
+        return ERR_RPLYMETH ;
+
+    ps->xhdr.function   = fmt->ping.methval ;
+    ps->xhdr.originator = HOSTMSG ;
+    ps->xhdr.rc         = ( ps->errcode ) ? HXP_FAIL : HXP_OK ;
+    ps->xhdr.rsn        = ps->errcode ;
+    ps->xhdr.seq        = ++ps->seq ;
+    memset( &ps->xhdr.attrs, 0, sizeof (struct xpRecAttrs) ) ;
+
+    ps->errcode         = 0 ;
+
+    return ( sendbufr( ps, 0, 0, ++ps->mid ) ) ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: logoff -  Terminate Client Session                       *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will perform the session services                 *
+*     request to terminate the clint session.                         *
+*                                                                     *
+*  Parameters: Address of psess block                                 *
+*                                                                     *
+*  Returns:    HXP_OK       - Session Successfully terminated         *
+*              ERR_SESSION  - Error terminating session               *
+*              ERR_RPLYMETH - Invalid reply method specified          *
+*                                                                     *
+**********************************************************************/
+
+int logoff( struct psess *ps ) {
+
+    struct xprepfmt *fmt ;
+    LOCAL int (*commreq)() ;
+
+    commreq = ps->prof->commreq ;
+    fmt     = ps->prof->xprep ;
+
+/*  ------------------------------------------------------------
+    If session is not ready to send, Indicate Pending hostorder
+    ------------------------------------------------------------ */
+    if ( ps->commstate != READY ) {
+        ps->pend_hostorder = PEND_LOGOFF ;
+        return HXP_OK ;
+    }
+
+/*  ------------------------------------------------------------
+    Terminate Session
+    ------------------------------------------------------------ */
+    if ( fmt->logoff.method  == CONTROL   &&
+         fmt->logoff.methval == ENDSESS ) {
+
+        if ( (commreq)( ps, END_SESSION, 0, 0 ) )
+             return ERR_SESSION ;
+    }
+    else
+        return ERR_RPLYMETH ;
+
+    return HXP_OK ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: locsess - Locate appl and logical session blocks         *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will return the appl and lsess pointers for       *
+*     for specific session.  If a lsess does not already exist,       *
+*     a new lsess block will be created.                              *
+*                                                                     *
+*  Parameters:  Addr of psess block                                   *
+*               Ptr to addr of appl block                             *
+*               Ptr to addr of lsess block                            *
+*                                                                     *
+*  Returns:  HXP_OK      - Session Blocks successfully located        *
+*            ERR_INVAPPL - Unable to locate appl block                *
+*                                                                     *
+**********************************************************************/
+
+int locsess( struct psess *ps,
+             struct appl  **app,
+             struct lsess **lsp ) {
+
+    struct appl  *ap ;
+    struct lsess *ls ;
+
+    LSESH  sesshndl ;
+    int    rc ;
+
+    if ( ! ( ap = locappl( ps->xhdr.applid, ps ) ) )
+       return ERR_INVAPPL ;
+
+    initLSESH( sesshndl, ps->xhdr.applid, ps->xhdr.lsessid, 0 ) ;
+
+    if ( ! ( ls = loclsess( sesshndl, ap ) ) ) {
+
+        if ( ! ( ++ps->lsesseq ) )
+            ps->lsesseq++ ;
+
+        sesshndl.sequence = ps->lsesseq ;
+
+        if ( ! ( ls = newlsess( ap, sesshndl, &rc ) ) )
+            return rc ;
+    }
+
+    *app = ap ;
+    *lsp = ls ;
+    return HXP_OK ;
+
+}
+
+
+/**********************************************************************
+*                                                                     *
+*  Function: status - Set status information is psess                 *
+*                                                                     *
+*  Description:                                                       *
+*                                                                     *
+*     This function will post the last completion status              *
+*     information to the psess block.  In addition if the             *
+*     the completion status indicates an error has occurred,          *
+*     a message will be journalled to the system log.                 *
+*                                                                     *
+*  Parameters:  Address of psess block                                *
+*               completion status code                                *
+*                                                                     *
+*  Returns:     HXP_OK   - status normal                              *
+*               HXP_FAIL - status error                               *
+*                                                                     *
+**********************************************************************/
+
+int status( struct psess *ps, int errcode ) {
+
+    MSGH msgh ;
+
+/*  ------------------------------------------------------------
+    If errcode is zero, return with normal completion
+    ------------------------------------------------------------ */
+    if ( ! errcode )
+        return HXP_OK ;
+
+    if ( ! ps->errcode )
+        ps->errcode = errcode ;
+
+/*  ------------------------------------------------------------
+    Initialize message defaults issue diagnostic message
+    ------------------------------------------------------------ */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, LOGFILE,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+    maddint( msgh, errcode ) ;
+    maddstr( msgh, errmsg( errcode ), 0 ) ;
+    msg( &msgh, 12, 0 ) ;
+
+    return HXP_FAIL ;
+}
+
+/**********************************************************************
+*                                                                     *
+*   Function: errmsg - Return Error msg associated w/ errcode         *
+*                                                                     *
+**********************************************************************/
+
+char * errmsg( int errcode ) {
+
+    char *err ;
+
+    switch ( errcode ) {
+
+        case HXP_OK:
+            err = "Normal completion" ;
+            break ;
+
+        case HXP_WARN:
+            err = "Request completed with warning(s)" ;
+            break ;
+
+        case ERR_STORAGE:
+            err = "Storage allocation failure" ;
+            break ;
+
+        case ERR_FLTRTN:
+            err = "Filter routine processing error" ;
+            break ;
+
+        case ERR_REQMETH:
+            err = "Unable to locate request method" ;
+            break ;
+
+        case ERR_HDRCONV:
+            err = "Xport header conversion error" ;
+            break ;
+
+        case ERR_TSEND:
+            err = "RU send to user process failed" ;
+            break ;
+
+        case ERR_SEQUENCE:
+            err = "Invalid sequence number received" ;
+            break ;
+
+        case ERR_SESSION:
+            err = "Session request failure" ;
+            break ;
+
+        case ERR_REQUEST:
+            err = "Invalid Xport request received" ;
+            break ;
+
+        case ERR_SEGMENT:
+            err = "Protocol segmentation error" ;
+            break ;
+
+        case ERR_PROFILE:
+            err = "Xport Profile violation" ;
+            break ;
+
+        case ERR_INVAPPL:
+            err = "Unable to locate application block" ;
+            break ;
+
+        case ERR_INVSESS:
+            err = "Logical session not active" ;
+            break ;
+
+        case ERR_RPLYMETH:
+            err = "Invalid reply method specified for action" ;
+            break ;
+
+        case ERR_CHAINING:
+            err = "Request unit chaining not supported" ;
+            break ;
+
+        default:
+            err = "Xport error encountered" ;
+    }
+
+    return err ;
+}
+
+/**********************************************************************
+*                                                                     *
+*   Function: htrace - Xport header trace                             *
+*                                                                     *
+**********************************************************************/
+
+int htrace( struct xhdrcomm *hdr, Ushort id ) {
+
+    MSGH msgh ;
+    char *txt ;
+
+    if ( msgattr( "Xptrace" ) )
+        return 0 ;
+
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+    maddint( msgh, hdr->seq ) ;
+    txt  = ( hdr->originator == HOSTMSG ) ? "OUT" : "IN " ;
+    maddstr( msgh, txt, 0 ) ;
+
+    switch ( hdr->attrs.segment ) {
+        case FIRST:
+            maddstr( msgh, "F", 0 ) ;
+            break ;
+
+        case MIDDLE:
+            maddstr( msgh, "M", 0 ) ;
+            break ;
+
+        case LAST:
+            maddstr( msgh, "L", 0 ) ;
+            break ;
+
+        case ONLY:
+            maddstr( msgh, "O", 0 ) ;
+            break ;
+
+        default:
+            maddstr( msgh, "N", 0 ) ;
+    }
+
+    maddstr( msgh, &hdr->function, sizeof hdr->function ) ;
+    maddint( msgh, hdr->applid ) ;
+    maddint( msgh, hdr->lsessid ) ;
+    maddint( msgh, hdr->attrs.phyrec ) ;
+    maddint( msgh, hdr->attrs.logrec ) ;
+    maddint( msgh, hdr->attrs.xmit   ) ;
+
+    txt  = ( hdr->attrs.squish ) ? "Yes" : "No " ;
+    maddstr( msgh, txt, 0 ) ;
+    maddint( msgh, id ) ;
+
+    msg( &msgh, 901, 0 ) ;
+
+    return 0 ;
+}
+
+/**********************************************************************
+*                                                                     *
+*   Function: rtrace - Xport request trace                            *
+*                                                                     *
+**********************************************************************/
+
+int rtrace( struct request *req ) {
+
+    MSGH msgh ;
+
+    if ( msgattr( "Xptrace" ) )
+        return 0 ;
+
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0) ;
+
+    if ( req->method == AID ) {
+        maddstr( msgh, "AID", 0 ) ;
+        switch ( req->methval ) {
+            case AID_PA1:
+                maddstr( msgh, "PA1", 0 ) ;
+                break ;
+            case AID_PA2:
+                maddstr( msgh, "PA2", 0 ) ;
+                break ;
+            case AID_PA3:
+                maddstr( msgh, "PA3", 0 ) ;
+                break ;
+            default:
+                maddstr( msgh, "N/A", 0 ) ;
+        }
+    }
+    else if ( req->method == CONTROL ) {
+        maddstr( msgh, "CONTROL", 0 ) ;
+        switch ( req->methval ) {
+            case SIGNAL:
+                maddstr( msgh, "SIGNAL", 0 ) ;
+                break ;
+
+            case ENDSESS:
+                maddstr( msgh, "ENDSESS", 0 ) ;
+                break ;
+
+            default:
+                maddstr( msgh, "N/A", 0 ) ;
+        }
+    }
+    else if ( req->method == CPIC ) {
+        maddstr( msgh, "CPIC", 0 ) ;
+        switch ( req->methval ) {
+            case REQTOSND:
+                maddstr( msgh, "REQUEST_TO_SEND", 0 ) ;
+                break ;
+
+            case SNDRECVD:
+                maddstr( msgh, "SEND_RECEIVED", 0 ) ;
+                break ;
+
+            case DEALLOC:
+                maddstr( msgh, "DEALLOCATE", 0 ) ;
+                break ;
+
+            default:
+                maddstr( msgh, "N/A", 0 ) ;
+        }
+    }
+    else {
+        maddstr( msgh, "N/A", 0 ) ;
+        maddstr( msgh, "N/A", 0 ) ;
+    }
+
+    msg( &msgh, 904, 0 ) ;
+
+    return 0 ;
+}
+
+
+/**********************************************************************
+*                                                                     *
+*   Function: dtrace - Xport data trace                               *
+*                                                                     *
+**********************************************************************/
+
+int dtrace( char *rec, int reclen, char dir, Ushort id ) {
+
+    MSGH msgh ;
+    char txtí36ù, txtpí16ù, c, nib ;
+    int  txtlen, txtplen, i, j, offset = 0 ;
+    char hextblí17ù = "0123456789ABCDEF" ;
+
+    if ( msgattr( "Xptrace" ) )
+        return 0 ;
+
+/*  ------------------------------------------------------------
+    Set message defaults
+    ------------------------------------------------------------ */
+    msgdft( &msgh, MSGDEFAULT, "HXP", MSGDEFAULT, MSGDEFAULT,
+            MSGDEFAULT, MSGDEFAULT, 0, MSGID,0,0,0,0,0 ) ;
+
+/*  ------------------------------------------------------------
+    Send data trace header message
+    ------------------------------------------------------------ */
+    if ( dir == 'I' ) {
+        maddstr( msgh, "Inbound", 0 ) ;
+    }
+    else {
+        maddstr( msgh, "Outbound", 0 ) ;
+    }
+
+    maddint( msgh, reclen ) ;
+    maddint( msgh, id ) ;
+    msg( &msgh, 902, 0 ) ;
+
+/*  ------------------------------------------------------------
+    Format and issue data line messages
+    ------------------------------------------------------------ */
+    while ( reclen ) {
+        memset( txt,  ' ', sizeof txt ) ;
+        memset( txtp, ' ', sizeof txtp ) ;
+        txtlen = txtplen = 0 ;
+
+        for ( i = 0 ; reclen && i < 4 ; i++ ) {
+            for ( j = 0 ; reclen && j < 4 ; j++ ) {
+                reclen-- ;
+                c   = *( rec++ ) ;
+                nib = ( c >> 4 ) ;
+                *(txt + txtlen++) = hextblínibù ;
+                nib = ( c & 0x0f ) ;
+                *(txt + txtlen++) = hextblínibù ;
+                if ( isprint( c ) )
+                    *(txtp + txtplen++) = c ;
+                else
+                    *(txtp + txtplen++) = '.' ;
+            }
+            txtlen++ ;
+        }
+
+        maddint( msgh, offset ) ;
+        maddstr( msgh, txt, sizeof txt ) ;
+        maddstr( msgh, txtp, sizeof txtp ) ;
+        msg( &msgh, 903, 0 ) ;
+
+        offset += (i * j) ;
+    }
+    return 0 ;
+}

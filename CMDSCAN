@@ -1,0 +1,329 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/* *****************************************************************
+
+       CMDSCAN - Command line scan and parse
+
+   ***************************************************************** */
+
+#include <string.h>
+#include <ctype.h>
+#include "env.h"
+#include "cmdscan.h"
+
+int getword( char **s, char **r )  ;
+int vfydata( char *p, int len, int fmt ) ;
+int scankeys( struct keytab *kt, char *string, int length ) ;
+int iskeychr( char p ) ;
+int isvaldlm( char p ) ;
+
+
+/* *****************************************************************
+
+     Function: CMDSCAN - Command line scan
+
+   ***************************************************************** */
+
+int cmdscan(
+    struct  keytab *kt,        /* keyword table                     */
+    struct  oplist *ot,        /* keyword value return table        */
+    char    **string,          /* command string origin             */
+    int     *esub,             /* index of keyword KEYTAB entry     */
+    const char **msg,          /* error msg, if appropriate         */
+    char    **errloc)          /* ptr to error origin or NULL       */
+{
+
+    struct  keytab *ktp ;
+    struct  oplist *otp ;
+    char    *retp, **ret = &retp ;
+    int     i, length, ndx, rc = PARSE_OK ;
+
+    static const char EOSmsg[]  = "End of string encountered" ;
+    static const char NDEFmsg[] = "Keyword not defined" ;
+    static const char PARMmsg[] = "Improper use of operand" ;
+    static const char DUPLmsg[] = "Duplicate keyword improper" ;
+    static const char SYNTAXmsg[] = "Syntax error in string" ;
+    static const char FORMmsg[] = "Keyword value data type error" ;
+
+    *msg = *errloc = NULL ;
+    *esub  = -1 ;
+
+/*  -----------------------------------------------------------------
+     acquire next token and validate
+    ----------------------------------------------------------------- */
+
+    if  ( ( length = getword( string, ret ) ) == 0 )  {
+        *msg = EOSmsg ;
+        rc = PARSE_EOS ;
+    }
+
+    else if ( length < 0 ) {
+        *msg = SYNTAXmsg ;
+        rc = PARSE_SYNTAX  ;
+    }
+
+    else  {
+
+        /* Skips any valid delimiter, loops so
+        * as to skip multiple spaces */
+        while ( isvaldlm( **string ) )
+            ++*string ;
+
+        if ( (*esub = scankeys( kt, *ret, length )) < 0 )  {
+            *msg = NDEFmsg ;
+            rc = PARSE_NDEF ;
+        }
+
+        else  {
+            ktp = kt + *esub ;
+            otp = ot + *esub ;
+
+            if ( otp->opspec )  {
+                *msg = DUPLmsg ;
+                rc = PARSE_DUPL ;
+            }
+        }
+    }
+
+/*  -----------------------------------------------------------------
+     extract associated values from keyword value list
+    ----------------------------------------------------------------- */
+
+    if ( ! rc )  {
+
+        for ( otp->opcount = i = 0 ; i < VALMAX ; i++ )  {
+            otp->opval[i].opadr = NULL ;
+            otp->opval[i].oplen = 0 ;
+        }
+
+        if  ( ktp->maxval > 0  &&  **string == '(' )  {
+            for ( i = 0 ; *(*string)++ != ')' && ! rc ; i++ )  {
+
+                /* Skips any valid delimiter, loops so
+                 * as to skip multiple spaces */
+                while ( isvaldlm( **string ) )
+                    ++*string;
+
+                if ( ( length = getword( string, ret ) ) < 0 )  {
+                    if (  **string == ')' ) continue;
+                    else {
+                    *msg = SYNTAXmsg ;
+                    rc = PARSE_SYNTAX  ;
+                    }
+                }
+
+                else if ( ! length && **string == ')' )
+                    continue ;
+
+                else if (! isvaldlm(**string) && **string != ')')  {
+                    *msg = SYNTAXmsg ;
+                    rc = PARSE_SYNTAX ;
+                }
+
+                else if ( i > VALMAX-1  ||  i > ktp->maxval - 1 )  {
+                    *msg = PARMmsg ;
+                    rc = PARSE_PARM ;
+                }
+
+                else  {
+                    ndx = otp->opcount++ ;
+
+                    if ( ! length )
+                        continue ;
+
+                    if ( ! vfydata( *ret, length, ktp->datatype ) )  {
+                        *msg = FORMmsg ;
+                        rc = PARSE_FORMAT ;
+                    }
+
+                    else  {
+                        otp->opval[ndx].opadr = *ret ;
+                        otp->opval[ndx].oplen = length ;
+                    }
+                }
+            }   /* END for ( i = 0 ; *(*string)++ != ')' && ! rc ; i++ ) */
+        }   /* END if  ( ktp->maxval > 0  &&  **string == '(' ) */
+    }   /* END if ( ! rc ) */
+
+    if ( isvaldlm( **string ) )
+        (*string)++ ;
+
+/*  ----------------------------------------------------------------
+    ensure number of values extracted satisfies minimum requirements
+    ---------------------------------------------------------------- */
+
+    if ( ! rc  &&  otp->opcount < ktp->minval )  {
+        *msg = PARMmsg ;
+        rc = PARSE_PARM ;
+    }
+
+/*  ----------------------------------------------------------------
+    post keyword / value list parse results and return
+    ---------------------------------------------------------------- */
+
+    if ( ! rc )
+        otp->opspec  = TRUE ;
+
+    else if ( rc > PARSE_OK )
+        *errloc = *ret ;
+
+    return( rc ) ;
+}
+
+
+/* *****************************************************************
+
+     Function: getword - retrieve next token in string
+
+     Description:
+
+        This function acquires the next token from the source string
+        provided.  A token is defined as a string of keyword chars,
+        or a string of arbitrary characters enclosed in quotes (").
+        In the latter case, the quotes are not included in the
+        token.
+
+     Entry:
+
+        **s   - addr of string ptr
+
+     Exit:
+
+        f()   - token length or zero
+        **r   - token origin return ptr
+        **s   - char in error or scan resume point
+
+   ***************************************************************** */
+
+int getword(char **s, char **r)  {
+
+    for ( ; isspace( **s ) ; ++*s ) ;
+
+    if ( **s == '[' )
+        return 0 ;
+
+    if  ( ! *( *r = *s ) )
+        return 0 ;
+
+    if  ( ! ( iskeychr( **s ) || **s == '"' ) )
+        return( -1 ) ;
+
+    if  ( **s != '"' )   {
+        while( iskeychr( *++*s ) ) ;
+        return( *s - *r ) ;
+    }
+
+    while( *++*s != '"' && **s ) ;
+
+    if  ( **s == '"' &&  ! ( iskeychr(*(*s + 1)) ) )
+        return( (*s)++ - ++*r ) ;
+    else
+        return( -1 ) ;
+}
+
+
+/* *****************************************************************
+
+     Function: vfydata - Verify value conformance with data format
+
+   ***************************************************************** */
+
+int vfydata( char *p, int len, int fmt ) {
+
+    int x ;
+
+    if ( ! fmt  ||  fmt == NOTYPE )
+        return TRUE ;
+
+    for  ( x = TRUE ; x && len ; ++p, --len ) {
+
+        switch( fmt )  {
+            case ALPHA:
+                x = isalpha( *p ) ;
+                break ;
+
+            case NUMERIC:
+                x = isdigit( *p ) ;
+                break ;
+
+            case HEX:
+                x = isxdigit( *p ) ;
+                break ;
+
+            case LABEL:
+                x = isxdigit( *p ) || isalpha( *p ) ||
+                    *p == '$' || *p == '@' || *p == '#' ;
+                break ;
+
+            default:
+                break ;
+        }
+    }
+    return( x ) ;
+}
+
+
+/* *****************************************************************
+
+   Function: scankeys - locate keyword definition in keyword table
+
+   ***************************************************************** */
+
+int scankeys( struct keytab *kt, char *string, int length)  {
+
+    struct keytab *keyorg = kt ;
+
+    for ( ; kt->keyword[0] ; kt++ )  {
+        if ( kt->keylen == length &&
+            strncmp( kt->keyword, string, length ) == 0 )
+        {
+            if ( kt->refer )
+                kt = kt->refer ;
+            return( kt - keyorg ) ;
+        }
+    }
+    return -1 ;
+}
+
+
+/* *****************************************************************
+
+   Function: iskeychr - validate keyword composition
+
+   ***************************************************************** */
+
+int iskeychr(char p) {
+
+    return( isalnum(p) || p == '$' || p == '#' || p == '@' ||
+              p == '_' || p == '-' ||
+              p == '.' || p == '?' || p == '*' ) ;
+}
+
+
+/* *****************************************************************
+
+   Function: isvaldlm - validate keyword delimitor
+
+   ***************************************************************** */
+
+int isvaldlm(char p) {
+
+    return( isspace(p) || p == ',' ) ;
+}
+

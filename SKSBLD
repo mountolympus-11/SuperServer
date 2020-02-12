@@ -1,0 +1,1026 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+/***********************************************************************
+*                                                                      *
+* Module:    SKSBLD - Construct Runtime SKS                            *
+*                                                                      *
+* Maintenance:                                                         *
+*                                                                      *
+*   11/11/94  Su-fen Wu    Par# 155202                                 *
+*             Change the sorting technique, use quick sort.            *
+*                                                                      *
+*   12/02/94  Ron Colmone  Par# 158038                                 *
+*                                                                      *
+*             Region SKS entries are now added outside of Variable     *
+*             statment blocks.  Duplicate Region SKS are deleted       *
+*             from runtime SKS and are shared between variables        *
+*             therefore they must not be included within the block.    *
+*                                                                      *
+*             Fixed VARRES logic used to resolve the relative          *
+*             position for a variable within a region.  Rectcpy is     *
+*             called to construct an nvimage for the region.           *
+*                                                                      *
+*   01/23/95  Tim Weltzer                                              *
+*             Flag sks_text entries as "dark" (invisible) if they      *
+*             are located within a dark field.                         *
+*                                                                      *
+*   05/04/95  Ron Colmone   Par# 186795                                *
+*             Removed copy of SKS pad character to variable insertion  *
+*             SKS statement.                                           *
+*                                                                      *
+*   05/16/95  Ron Colmone  Par# 188430                                 *
+*             Erase EOF SKS statements will be suppressed when         *
+*             variable definition indicates that default field         *
+*             clear is omitted.  Instead,  the variable insertion      *
+*             statement will contain the initialize input area         *
+*             attribute with the appropriate pad character.            *
+*                                                                      *
+*   09/28/95  Ron Colmone  Par# 218825                                 *
+*             Corrected error in conversion between rectangle to       *
+*             absolute cursor position.                                *
+*                                                                      *
+*   11/13/95  Ron Colmone  Par# 227305                                 *
+*             Added support for cursor positioning variable definition.*
+*                                                                      *
+***********************************************************************/
+
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "convert.h"
+#include "systbls.h"
+#include "region.h"
+#include "image.h"
+#include "rectcpy.h"
+#include "draw.h"
+#include "nav.h"
+#include "sks.h"
+#include "vars.h"
+#include "attrib.h"
+
+#define  INITORD   50           /* Initial Order Array size           */
+
+#define isattr(byte)                             \
+  ((((unsigned char)(byte)) >= ATTR_RANGE_START) \
+  && (((unsigned char)(byte)) <= ATTR_RANGE_END))
+
+#define isdark(byte) \
+  ((((unsigned char)(byte)) & ATTR_DARK) == ATTR_DARK)
+
+int isdarkfld(                         /* test if in an invisible fld.*/
+  struct image *,                      /* i/  - image buffer          */
+  short                                /* i/  - cursor position       */
+  );
+
+int isksordc() ;
+
+/* ******************************************************************
+
+    Function: sksbld - Construct runtime SKS
+
+    Description:
+
+      This function constructs a runtime SKS (stored keystrokes
+      script) using the recorded SKS as a base and applying the
+      variable/literal/region definitions with associated locator
+      methods to the SKS procedure.  All storage associated with
+      the newly constructed SKS resides in the the storage pool
+      provided.  SKS order array is maintained to track the SKS
+      statements and provide a mechinism for sorting the statements
+      into a priority sequence.   Literal definition will sort
+      to the front of the SKS and variable definitions will sort
+      the end.  If a literal or variable defintion encompasses
+      an entire recorded keystroke (literal), then the associated
+      statements are removed from the runtime SKS.
+
+
+    Method:
+
+      1) Initialize SKS order array using the recorded SKS
+         statements.
+
+      2) Construct SKS statements for each input variable / literal
+         definition.  Add generate statements to the SKS order
+         array and mark recorded statements to be removed.
+
+      3) Sort the SKS order array in priority sequence.  Literal
+         definitions will preceed variable definitions.
+
+      4) Mark identical adjacent region locator SKS statements
+         for removal.
+
+      5) Determine runtime SKS storage requirements.
+
+      6) Copy SKS statements from order array into new
+         runtime SKS area.
+
+    Entry:
+
+      Pointer to Storage pool queue header
+      Pointer to recorded SKS statement origin
+      Pointer to S0 image strucuture associated w/ recorded SKS
+      Pointer to Variable/literal definition list associated w/ S0
+      Pointer to status return area
+
+    Returns:
+
+      Pointer to runtime SKS origin or 0 ( Build error )
+
+    Error Conditions:
+
+      ERR_STORAGE - Error allocating storage
+
+   ****************************************************************** */
+
+struct sksstmt * sksbld (
+    struct stghdrq *qh,         /* Storage Manager queue header       */
+    struct sksstmt *s,          /* Recorded SKS script origin         */
+    struct image   *img,        /* Base screen image structure        */
+    struct nvvar   *var,        /* Variable definition list           */
+    int    *status      )       /* Error return status code           */
+{
+
+    struct sksstmt   *stmt ;
+    struct sks_rgn   *sr ;
+    struct sksordhdr oh ;
+    int    i, len, stmtlen ;
+    short  csrp = 0 ;
+    char   lastrgní16ù ;
+
+    *status = 0 ;
+
+/*  -----------------------------------------------------------------
+    Allocate an initial SKS order array
+    ----------------------------------------------------------------- */
+    memset( &oh , 0, sizeof oh ) ;
+    if ( *status = ordallc( qh, &oh, INITORD ) )
+        return( 0 ) ;
+
+/*  -----------------------------------------------------------------
+    Initialize order array with recorded SKS
+    ----------------------------------------------------------------- */
+    while ( s ) {
+
+        if ( s->verb == SKSV_CSR )
+            csrp = ( (struct sks_csr *) s )->csrp ;
+
+        if (( s->verb == SKSV_TEXT )
+           && (img != 0)
+           && isdarkfld(img, csrp))
+           {
+           ((struct sks_text *) s )->flags |= TEX_FINV;
+           }
+
+        if ( *status = addstmt( qh, &oh, s, FALSE, SKST_LIT, csrp ) ) {
+            ordfree( qh, &oh ) ;
+            return( 0 ) ;
+        }
+
+        if ( s->verb == SKSV_END )
+            break ;
+
+        stmtlen = oh.oíoh.count-1ù.stmtlen ;
+        s = (struct sksstmt *) ( (char *) s + stmtlen ) ;
+    }
+
+/*  -----------------------------------------------------------------
+    Process input variables/literals or cursor positioning variables.
+    Construct SKSSTMT entries for each variable or literal definition
+    processed.
+    ----------------------------------------------------------------- */
+    if ( var ) {
+        for ( i = 0 ; i < var->count ; i++ ) {
+            if ( (  var->entryíiù.svar->svarutyp == svar_inp )  ||
+                 (  var->entryíiù.svar->svarflg2 & svarf2cp ) ) {
+                if ( *status = bldstmt( qh,
+                                        var->entryíiù.svar,
+                                        img,
+                                        &oh ) ) {
+                    stmtfree( qh, &oh ) ;
+                    ordfree(  qh, &oh ) ;
+                    return( 0 ) ;
+                }
+            }
+        }
+    }
+
+/*  -----------------------------------------------------------------
+    Sort SKS statements into appropriate sequence for runtime.
+    ----------------------------------------------------------------- */
+    igenqsrt( oh.o, oh.count, sizeof(struct sksorder), isksordc) ;
+
+/*  -----------------------------------------------------------------
+    Remove Adjacent region SKS statements
+    ----------------------------------------------------------------- */
+    memset( lastrgn, ' ', sizeof lastrgn ) ;
+
+    for ( i = 0 ; i < oh.count ; i++ ) {
+        if ( oh.oíiù.stmt->verb == SKSV_RGN ) {
+            sr = (struct sks_rgn *) oh.oíiù.stmt ;
+            if ( memcmp( lastrgn, sr->rgnname, sizeof lastrgn ) )
+                 memcpy( lastrgn, sr->rgnname, sizeof lastrgn ) ;
+            else
+                 oh.oíiù.delete = TRUE ;
+        }
+    }
+
+/*  -----------------------------------------------------------------
+    Determine the storage requirements for generated runtime SKS
+    ----------------------------------------------------------------- */
+    len = 0 ;
+
+    for ( i = 0 ; i < oh.count ; i++ ) {
+        if ( ! ( oh.oíiù.delete ) )
+            len += oh.oíiù.stmtlen ;
+    }
+
+/*  -----------------------------------------------------------------
+    Allocate storage for generated runtime SKS
+    ----------------------------------------------------------------- */
+    if ( ! ( s = stmt = stgget( qh, len ) ) ) {
+        stmtfree( qh, &oh ) ;
+        ordfree ( qh, &oh ) ;
+
+        *status = ERR_STORAGE ;
+        return( 0 ) ;
+    }
+
+/*  -----------------------------------------------------------------
+    Copy SKS statements to generated runtime SKS
+    ----------------------------------------------------------------- */
+    for ( i = 0 ; i < oh.count ; i++ ) {
+        if ( ! ( oh.oíiù.delete ) ) {
+            memcpy( s, oh.oíiù.stmt, oh.oíiù.stmtlen ) ;
+            s = (struct sksstmt *) ( (char *) s + oh.oíiù.stmtlen ) ;
+        }
+    }
+
+    stmtfree( qh, &oh ) ;
+    ordfree ( qh, &oh ) ;
+
+    return stmt ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: bldstmt - Construct runtime SKS statements
+
+    Description:
+
+      This function will construct the runtime SKS statements
+      required by a variable/literal definition.  A locator
+      sks statement, optionally a region locator sks statement,
+      and either a text or variable substitution statement is
+      generated.  These SKS statements are added to the SKS order
+      array. If a variable/literal definition replaces a recorded
+      literal,  the associated sks statements are marked for
+      removal from the runtime SKS script.
+
+   ****************************************************************** */
+
+int bldstmt( struct stghdrq   *qh,
+      struct svarsect  *v,
+      struct image     *img,
+      struct sksordhdr *oh )
+{
+
+    struct sksorder *CSRord, *EOFord, *TXTord, *LITord ;
+    struct sksstmt  *s, *sx ;
+    struct sks_csr  *rsc ;
+    struct sks_text *rst, *st ;
+    struct sks_loc  *sl ;
+    struct sks_rgn  *sr ;
+    struct sks_var  *sv ;
+    struct sks_blk  *sb ;
+
+    struct recentry *re ;
+    struct sysrgn   *rgn ;
+
+    char   type, rgnflgs ;
+    char   *dp ;
+    short  *dlenp ;
+    short  position ;
+    short  pos      = 0 ;
+    int    rc       = 0 ;
+    int    region   = FALSE ;
+    int    recmatch = 0 ;
+    int    len ;
+    int    pass ;
+
+/*  -----------------------------------------------------------------
+    Determine if variable is contained within a region
+    ----------------------------------------------------------------- */
+    if ( v->svaregní0ù & 0xbf ) {
+        region  = TRUE ;
+        rgnflgs = 0 ;
+        if ( rgn = locrgn( img->rt, v->svaregn ) ) {
+            rgnflgs |= ( rgn->Hrepeat ) ? HREPEAT : 0 ;
+            rgnflgs |= ( rgn->Vrepeat ) ? VREPEAT : 0 ;
+        }
+    }
+
+/*  -----------------------------------------------------------------
+    Determine variable / literal definition type
+    ----------------------------------------------------------------- */
+    if ( v->svarflg2 & svarf2cp )
+        type = SKST_CSR ;
+    else if ( v->svarflg1 & svarf1lt )
+        type = SKST_LIT ;
+    else
+        type = SKST_VAR ;
+
+/*  -----------------------------------------------------------------
+    Resolve variable/literal definition postition for each region
+    instance.  If variable defition matches with recorded sks stmts
+    then mark recorded sks statements to be deleted from runtime
+    SKS.  The saved varable position will be used when adding new
+    sks statements to allow SKS to sort properly.
+    ----------------------------------------------------------------- */
+    len   = v->svarlen ;
+    re    = img->re ;
+
+    for ( pass = 0 ; ( getvpos( qh, v, img, oh, &re, &position ) &&
+                     ( ! pass || region ) ) ; pass++ ) {
+
+        pos = position ;
+
+/*      -------------------------------------------------------------
+        Retrieve matching recorded literal definition entries
+        ------------------------------------------------------------- */
+        CSRord = getsksord( oh, pos, len, SKSV_CSR  ) ;
+        EOFord = getsksord( oh, pos, len, SKSV_EOF  ) ;
+        TXTord = getsksord( oh, pos, len, SKSV_TEXT ) ;
+
+/*      -------------------------------------------------------------
+        If recorded sks statements are being replace by Variable /
+        Literal definitions,  then post recorded sks statements to
+        be deleted from runtime SKS.
+        ------------------------------------------------------------- */
+        if ( CSRord && TXTord ) {
+            rsc    = (struct sks_csr  *) CSRord->stmt ;
+            rst    = (struct sks_text *) TXTord->stmt ;
+            LITord = TXTord ;
+
+            if ( rsc->csrp == pos ) {
+                recmatch++ ;
+                CSRord->delete  = TRUE ;
+                TXTord->delete  = TRUE ;
+                if ( EOFord )
+                    EOFord->delete = TRUE ;
+            }
+        }
+    }
+
+/*  -----------------------------------------------------------------
+    If literal definition does not match up with a recorded SKS
+    text entry statement,  then discard literal definition.
+    ----------------------------------------------------------------- */
+    if ( type == SKST_LIT && ! recmatch )
+         return rc ;
+
+/*  -----------------------------------------------------------------
+    If the variable is contained within a region,  construct region
+    SKS statement.  Region locator/extractor SKS statements are
+    not contained within the Variable BLOCK of statements since
+    duplicates region SKS statements may be removed.  Therefore,
+    Region SKS statements are not tied to a single variable.
+    ----------------------------------------------------------------- */
+    if ( region ) {
+
+        if ( ! ( sr = stgget( qh, sizeof( struct sks_rgn ) ) ) )
+            return ERR_STORAGE ;
+
+        sr->verb   = SKSV_RGN ;
+        sr->flags |= rgnflgs ;
+
+        memcpy( sr->rgnname, v->svaregn, sizeof sr->rgnname ) ;
+
+        if ( rc = addstmt(qh, oh, (struct sksstmt *) sr, TRUE, type, pos ) )
+            return rc ;
+    }
+
+/*  -----------------------------------------------------------------
+    Construct Beginning of variable Block statement.
+    ----------------------------------------------------------------- */
+    if ( ! ( sb = stgget( qh, sizeof( struct sks_blk ) ) ) )
+         return ERR_STORAGE ;
+
+    sb->verb = SKSV_BLK ;
+    memcpy( sb->varname, v->svarname, sizeof sb->varname ) ;
+    memcpy( sb->stnname, v->svarsnam, sizeof sb->stnname ) ;
+
+    if ( type == SKST_LIT )
+         sb->flags Ý= VAR_LIT ;
+
+    if ( v->svarflg1 & svarf1rq )
+         sb->flags Ý= VAR_REQ ;
+
+    if ( v->svarflg2 & svarf2cp )
+         sb->flags Ý= VAR_CSRP ;
+
+    if ( rc = addstmt(qh, oh, (struct sksstmt *) sb, TRUE, type, pos ) )
+         return rc ;
+
+/*  -----------------------------------------------------------------
+    Construct Variable / Literal locator sks statement.
+    ----------------------------------------------------------------- */
+    if ( ! ( sl = stgget( qh, sizeof( struct sks_loc ) ) ) )
+        return ERR_STORAGE ;
+
+    sl->verb = SKSV_LOC ;
+    sl->var  = v ;
+
+    if ( region )
+        sl->flags Ý= LOC_RGN ;
+
+    if ( rc = addstmt( qh, oh, (struct sksstmt *) sl, TRUE, type, pos ) )
+        return rc ;
+
+/*  -----------------------------------------------------------------
+    If variable/literal definition is replacing a recorded erase
+    EOF statement,  Add Erase-EOF to follow locator SKS verb.
+    ----------------------------------------------------------------- */
+    if ( v->svarutyp == svar_inp && !(v->svarflg1 & svarf1nc) ) {
+        if ( ! ( s = stgget( qh, sizeof( struct sksstmt ) ) ) )
+            return ERR_STORAGE ;
+
+        s->verb = SKSV_EOF ;
+
+        if ( rc = addstmt( qh, oh, (struct sksstmt *) s, TRUE, type, pos ) )
+            return rc ;
+
+    }
+
+/*  -----------------------------------------------------------------
+    If variable definition is for a literal,  then construct SKS text
+    statement.
+    ----------------------------------------------------------------- */
+    if ( v->svarutyp == svar_inp ) {
+      if ( type == SKST_LIT )  {
+
+        if ( recmatch == 1 || ! v->svardval ) {
+            if ( ! ( st = stgget( qh, LITord->stmtlen ) ) )
+                return ERR_STORAGE ;
+
+            memcpy( st, rst, LITord->stmtlen ) ;
+            st->textlen = min( rst->textlen, v->svarlen ) ;
+        }
+        else {
+            dlenp  = (short *) v->svardval ;
+            dp     = (char  *)( dlenp + 1 ) ;
+
+            len = min( *dlenp, v->svarlen ) ;
+
+            if ( ! ( st = stgget( qh, len + sizeof(struct sks_text) ) ) )
+                return ERR_STORAGE ;
+
+            memcpy( st, rst, sizeof( struct sks_text ) ) ;
+            memcpy( st->text, dp, len ) ;
+            st->textlen = len ;
+        }
+
+        if ( rc = addstmt(qh, oh, (struct sksstmt *) st, TRUE, type, pos ) )
+            return rc ;
+
+      }
+
+/*    ---------------------------------------------------------------
+      Construct Variable substitution SKS statement.
+      --------------------------------------------------------------- */
+      else {
+        if ( ! ( sv = stgget( qh, sizeof( struct sks_var ) ) ) )
+            return ERR_STORAGE ;
+
+        sv->verb    = SKSV_VAR ;
+        sv->padchar = 0 ;
+
+        if ( v->svarflg1 & svarf1nc )  {
+            sv->flags |= VAR_PAD ;
+            if ( v->svaruse & svaru_blnk )
+                sv->padchar = ' ' ;
+        }
+
+        sv->varlen = v->svarlen ;
+        memcpy( sv->varname, v->svarname, sizeof sv->varname ) ;
+
+        if ( rc = addstmt(qh, oh, (struct sksstmt *) sv, TRUE, type, pos ) )
+            return rc ;
+      }
+    }
+
+/*  -----------------------------------------------------------------
+    Construct Exit from block statement.
+    ----------------------------------------------------------------- */
+    if ( ! ( sx = stgget( qh, sizeof( struct sksstmt ) ) ) )
+         return ERR_STORAGE ;
+
+    sx->verb = SKSV_XIT ;
+
+    if ( rc = addstmt( qh, oh, (struct sksstmt *) sx, TRUE, type, pos ) )
+         return rc ;
+
+/*  -----------------------------------------------------------------
+    Normal return
+    ----------------------------------------------------------------- */
+    return rc ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: getsksord - Locate an SKS order for Screen coord
+
+    Description:
+
+      This function will locate an sks order from the order array
+      for the specified screen coordinantes within the postition
+      and length provided.  If located the sksorder entry for
+      the requested verb is returned.
+
+   ****************************************************************** */
+
+struct sksorder * getsksord(
+             struct sksordhdr *oh,
+             int    pos,
+             int    len,
+             char   verb          )
+
+{
+
+    struct sksorder *o ;
+    struct sksstmt  *s ;
+    struct sks_csr  *sc ;
+
+    int    i, match = FALSE ;
+
+    for ( i = 0 ; i < oh->count ; i++ ) {
+        o = &oh->oíiù ;
+        s = o->stmt ;
+
+        if ( ! match ) {
+            if ( s->verb == SKSV_CSR ) {
+                sc = (struct sks_csr *) s ;
+
+                if ( sc->csrp >= pos && sc->csrp <= pos + len )
+                    match = TRUE ;
+            }
+        }
+        else {
+            if ( s->verb == SKSV_CSR || s->verb == SKSV_END )
+                return 0 ;
+        }
+
+        if ( match && ( s->verb == verb ) )
+            return o ;
+    }
+
+    return 0 ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: addstmt - Add SKS statement SKS order array
+
+    Description:
+
+      This function will add an SKS statement to the sksorder
+      array.  The sortkey will be created using the type and
+      sequence number provide.  If the sksorder array exceeds
+      capacity,  it will be reallocated and copied to an new
+      order array (double in size).
+
+   ****************************************************************** */
+
+int addstmt( struct stghdrq   *qh,
+             struct sksordhdr *oh,
+             struct sksstmt   *s,
+             char   alloc,
+             char   type,
+             short  csrp   )
+{
+    struct sks_text  *st ;
+    struct sksorder  ord ;
+
+    int    rc = 0 ;
+
+/*  -----------------------------------------------------------------
+    Add SKS order entries
+    ----------------------------------------------------------------- */
+    memset( &ord, 0, sizeof ord ) ;
+    ord.key.type     = type ;
+    ord.key.csrp     = csrp ;
+    ord.key.sequence = ++oh->sequence ;
+    ord.stmt         = s ;
+    ord.salloc       = alloc ;
+
+    switch ( s->verb ) {
+
+        case SKSV_BLK:
+            ord.stmtlen = sizeof( struct sks_blk ) ;
+            break ;
+
+        case SKSV_CSR:
+            ord.stmtlen = sizeof( struct sks_csr ) ;
+            break ;
+
+        case SKSV_TEXT:
+            st = (struct sks_text *) s ;
+            ord.stmtlen = sizeof( struct sks_text ) + st->textlen ;
+            break ;
+
+        case SKSV_RGN:
+            ord.stmtlen = sizeof( struct sks_rgn ) ;
+            break ;
+
+        case SKSV_LOC:
+            ord.stmtlen = sizeof( struct sks_loc ) ;
+            break ;
+
+        case SKSV_VAR:
+            ord.stmtlen = sizeof( struct sks_var ) ;
+            break ;
+
+        case SKSV_EOF:
+            ord.stmtlen = sizeof( struct sksstmt ) ;
+            break ;
+
+        case SKSV_XIT:
+            ord.stmtlen = sizeof( struct sksstmt ) ;
+            break ;
+
+        case SKSV_END:
+            ord.stmtlen  = sizeof( struct sksstmt ) ;
+            ord.key.type = SKST_TRM ;
+            break ;
+    }
+
+    if ( rc = ordadd( qh, oh, ord ) ) {
+        return( rc ) ;
+    }
+
+    return 0 ;
+}
+
+
+/* ******************************************************************
+
+    Function: ordadd - Add SKS order to the order array
+
+    Description:
+
+      This function will add an sksorder to the order array.  If
+      the sksorder array exceeds capacity,  it will be
+      reallocated and copied to an new order array (double in
+      size).
+
+   ****************************************************************** */
+
+int ordadd( struct stghdrq   *qh,   /* Storage queue Header           */
+            struct sksordhdr *oh,   /* SKS order array pointer header */
+            struct sksorder  ord )  /* SKSorder to be added to array  */
+{
+
+    int    rc = 0 ;
+
+/*  -----------------------------------------------------------------
+    If overflow has occurred on order array,  reallocate order
+    array, copy order array structure to new area and free old
+    order array.
+    ----------------------------------------------------------------- */
+    if ( oh->count == oh->slots )
+        if ( rc = ordallc( qh, oh, oh->slots * 2 ) )
+            return( rc ) ;
+
+/*  -----------------------------------------------------------------
+    copy sksorder to next available slot in order array
+    ----------------------------------------------------------------- */
+    oh->oíoh->count++ù = ord ;
+    return 0 ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: ordaloc - Allocate SKS order array
+
+    Description:
+
+      This function will allocate an SKS order for the specified
+      number of slots.  If an order array already exists,  it
+      will be copied to the new storage area and then its storage
+      will be released.
+
+   ****************************************************************** */
+
+int ordallc( struct stghdrq   *qh,  /* Storage queue Header           */
+             struct sksordhdr *oh,  /* SKS order array header         */
+             int    slots )         /* Total Number of order slots    */
+{
+
+    struct sksorder *o ;
+
+/*  -----------------------------------------------------------------
+    Allocate new sks order array
+    ----------------------------------------------------------------- */
+    if ( ! ( o = stgget( qh, sizeof(struct sksorder) * slots ) ) )
+        return ERR_STORAGE ;
+
+/*  -----------------------------------------------------------------
+    If SKS order array previously existed,  then copy order array
+    to newly allocated order array and free old array.
+    ----------------------------------------------------------------- */
+    if ( oh->count ) {
+        memcpy( o, oh->o, sizeof(struct sksorder) * oh->count ) ;
+        ordfree( qh, oh ) ;
+    }
+
+    oh->o     = o ;
+    oh->slots = slots ;
+
+    return 0 ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: ordfree - Free SKS order array storage
+
+    Description:
+
+       This function will release the storage associated with
+       an SKS order array.
+
+   ****************************************************************** */
+
+int ordfree( struct stghdrq   *qh,  /* Storage queue Header           */
+             struct sksordhdr *oh ) /* SKS order array header         */
+{
+
+    stgretn( qh, sizeof(struct sksorder) * oh->slots, oh->o ) ;
+
+    oh->o     = 0 ;
+    oh->slots = 0 ;
+
+    return 0 ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: stmtfree - Free allocated SKS statements
+
+    Description:
+
+       This function will free all the SKS statements specified
+       in the SKS order array which were allocated during runtime
+       sks construction processing.
+
+   ****************************************************************** */
+
+int stmtfree( struct stghdrq   *qh,  /* Storage queue Header          */
+              struct sksordhdr *oh ) /* SKS order array header        */
+{
+
+    int  i ;
+
+    for ( i = 0 ; i < oh->count ; i++ ) {
+        if ( oh->oíiù.salloc && oh->oíiù.stmt ) {
+            stgretn( qh, oh->oíiù.stmtlen, oh->oíiù.stmt ) ;
+            oh->oíiù.stmt    = 0 ;
+            oh->oíiù.stmtlen = 0 ;
+        }
+    }
+
+    return 0 ;
+
+}
+
+/* ******************************************************************
+
+    Function: getvpos - Retrieve absolute variable position
+
+    Description:
+
+       Locate relative position of variable/literal definition
+       on model screen.  If the variable is defined within a
+       region,  the region image (window) must first be
+       extracted prior to calling the varres function to locate
+       variable position.  Region variables are then relocated
+       to the relative location within the presentation space.
+       If a temporary region image was created, it is
+       subsequently freed.
+
+   ****************************************************************** */
+
+int getvpos( struct stghdrq   *qh,
+             struct svarsect  *v,
+             struct image     *img,
+             struct sksordhdr *oh,
+             struct recentry  **renext,
+             short            *position )
+{
+
+
+    struct image    *i  = NULL ;
+    struct recentry *rt, *re = NULL ;
+    VINFO  vinfo ;
+
+    int    (*vres )() ;
+    int    (*ifree)() ;
+    int    region = FALSE, repeat_end = FALSE ;
+    int    variable_located = FALSE ;
+    short  pos = 0 ;
+
+/*  -----------------------------------------------------------------
+    Obtain required function addresses from CVT vector table
+    ----------------------------------------------------------------- */
+    vres  = ( int (*)() ) getfunc( "IVARRES" ) ;
+    ifree = ( int (*)() ) getfunc( "IMGFREE" ) ;
+
+/*  -----------------------------------------------------------------
+    Determine if variable is contained within a region
+    ----------------------------------------------------------------- */
+    if ( v->svaregní0ù & 0xbf )
+        region = TRUE ;
+
+/*  -----------------------------------------------------------------
+    Locate variable within region if specified,  if the variable
+    is not located within a region instance, the processing
+    continues with the next instance of the repeating region.
+    ----------------------------------------------------------------- */
+    rt = *renext ;
+
+    while ( ! repeat_end ) {
+        if ( region ) {
+            if ( re = locrect( rt, v->svaregn ) )
+                i  = rectcpy( qh, img, &re->rsmry.abs, v->svaregn ) ;
+        }
+        else
+            i = img ;
+
+/*      -------------------------------------------------------------
+        Locate variable in current rectangle image buffer and set
+        relative position in buffer.  If variable is region, convert
+        to asolute relative position
+        ------------------------------------------------------------- */
+        if ( i && (vres)( i, v, &vinfo ) ) {
+            variable_located = TRUE ;
+            pos = (vinfo.origin - i->buffer) ;
+
+            if ( region )
+                pos = csrrtoa( img, re, pos ) ;
+        }
+
+/*      -------------------------------------------------------------
+        Free image structure if created for image rectangle
+        ------------------------------------------------------------- */
+        if ( i && region ) {
+            (ifree)( qh, &i ) ;
+        }
+
+/*      -------------------------------------------------------------
+        If there are more recentry's and variable was not located
+        in the current region instance then locate next region.
+        ------------------------------------------------------------- */
+        if ( ! re || ! ( rt = re->next ) || variable_located )
+            repeat_end = TRUE ;
+    }
+
+    *position = pos ;
+    *renext   = rt ;
+
+    return variable_located ;
+
+}
+
+
+/* ******************************************************************
+
+   Function: locrect - Locate region rectangle
+
+   Description:
+
+     This function will locate is a specific region in rectree
+     tiled for the current image.  If the region is available
+     the associated recentry address is returned.
+
+   Entry:  Address of the root recentry for the image
+           Address of the region name
+
+   Return: Address of the first recentry instance in the image
+           0 = Region not found in image
+
+   ****************************************************************** */
+
+struct recentry * locrect( struct recentry *rt, char *rgnname ) {
+
+    struct recentry *re ;
+
+    for ( re = rt ; re ; re = re->next )
+        if ( ! ( memcmp( re->rn->rgn->name, rgnname ,
+                         sizeof re->rn->rgn->name ) ) )
+            break ;
+
+    return re ;
+
+}
+
+
+/* ******************************************************************
+
+   Function: locrgn - Locate sysregion
+
+   Description:
+
+     This function will locate is a specific sysregion definition
+     in the region network.
+
+   Entry:  Address of the region tree for the image
+           Address of the region name
+
+   Return: Address of the first recentry instance in the image
+           0 = Region not found in image
+
+   ****************************************************************** */
+
+struct sysrgn * locrgn( struct rgntree *rt, char *rgnname ) {
+
+    struct rgntry *rn ;
+
+    for ( rn = &rt->root ; rn ; rn = rn->next )
+        if ( rn->rgn && ! memcmp( rn->rgn->name, rgnname, RGNAMESZ ) )
+            break ;
+
+    return ( ( rn ) ? rn->rgn : NULL ) ;
+
+}
+
+/*--------------------------------------------------------------------*/
+/* Test for dark field                                                */
+/* Search backwards from supplied position through the buffer for     */
+/* the start of a 3270 field (attribute byte) and return:             */
+/* 0 - not in an invisible field                                      */
+/* 1 - in an invisible field                                          */
+/*--------------------------------------------------------------------*/
+
+int isdarkfld(                         /* test if in an invisible fld.*/
+  struct image *   image,              /* i/  - image buffer          */
+  short            csrp                /* i/  - cursor position       */
+  )
+
+{
+  char *           Pos;                /* current position in buffer  */
+
+  /*
+  ** Locate field's attribute byte in image buffer
+  */
+
+  for(Pos = image->buffer + csrp;
+    ((Pos != image->buffer) && !isattr(*Pos));
+    Pos--)
+    {
+    ; /* position to attribute byte or start of image buffer */
+    }
+
+  if (Pos == image->buffer)            /* start of buffer ?           */
+    {
+    for(Pos = image->buffer + image->buflen;  /* yes, wrap            */
+      ((Pos != (image->buffer + csrp)) && !isattr(*Pos));
+      Pos--)
+      {
+      ; /* position to attribute byte or cursor position */
+      }
+    if (Pos == image->buffer + image->buflen)
+      {
+      return(0);
+      }
+    }
+
+  return(isdark(*Pos));
+
+}

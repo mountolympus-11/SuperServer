@@ -1,0 +1,860 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#title L$UHEAP -- C SYSTEM PROGRAMMER ENVIRONMENT SAMPLE MALLOC/FREE
+/*-------------------------------------------------------------------
+ *
+ * MODIFIED TO USE INTEGRATOR STORAGE ALLOCATOR
+ *
+ * Copyright (c) 1991 by SAS Institute Inc.  All rights reserved.
+ *
+ * NAME:       <=== L$UHEAP
+ * ALIASES:    <=== MALLOC, FREE
+ * SUPPORT:    <=== LANGUAGE SYSTEMS
+ * PRODUCT:    <=== SAS/C
+ * TYPE:       <=== RESIDENT, SAMPLE
+ * LANGUAGE:   <=== C
+ * MACHINE:    <=== 370
+ * SYSTEM:     <=== OS/CMS/CICS
+ * ATTRIBUTES: <=== RENT
+ * PURPOSE:    <=== Implement the malloc and free functions in the
+ *                  absence of the C run-time library, optionally
+ *                  with overlay checking and/or interruptability.
+ *
+ * HISTORY:     ACTION                          DATE    NAME
+ *            INITIAL CODING.                  05/05/88
+ *            Bimodal CMS support              03/09/89
+ *            CICS support.                     18Jan91
+ *            #pragma map use                  01/29/91
+ *
+ * RELATED:    <=== L$UMAIN
+ *
+ * SYSTEM CALLS<=== GETSTOR for INTEGRATOR
+ * SYSTEM CALLS<=== GETMAIN/DMSFREE, ABEND
+ *
+ * ABENDS:     <=== user 1206 -- queues overlaid
+ *                  user 1208 -- invalid free request
+ *
+ * NOTES:      <=== This module may be modified by the user.  See
+ *                  below for symbol definitions for optional
+ *                  features.
+ *
+ * DIRECTIONS: <=== Use the DEFINE compiler option to enable
+ *                  overlay checking or interruptability.
+ *                  If CICS support is generated, this
+ *                  code must first be preprocessed by the
+ *                  CICS command translator.
+ *
+ * END
+ *-----------------------------------------------------------------*/
+
+#include <string.h>
+#ifndef CICS                                                  /* 5.0 */
+#include <svc.h>
+#endif                                                        /* 5.0 */
+#include <code.h>
+#include <ctl370.h>
+
+#ifndef CICS                                                  /* 5.0 */
+#ifdef CMS
+#ifdef BIMODAL   /* define for AMODE 31 support */
+#include <cmsstor.h>                                          /* 4.5 */
+#else
+#include <dmsfree.h>
+#endif
+#else
+/*===================================================================*/
+/* INT */
+void * GETSTOR(long);                  /* integrator allocator       */
+/*===================================================================*/
+/* #include <getmain.h> */
+#endif
+#endif                                                        /* 5.0 */
+#eject
+            /*********************************************************/
+            /* This implementation of malloc/free supports two       */
+            /* optional features: a feature to detect memory overlays*/
+            /* and invalid free requests, and one to permit malloc   */
+            /* or free to be called by an interrupt handler, even    */
+            /* if malloc or free was running at the time of the      */
+            /* interrupt.  The first feature is enabled by #define   */
+            /* of CHECKING, the second by #define of SYNCH.  Each    */
+            /* feature increases code size, execution size, and the  */
+            /* memory overhead per allocation. The supplied object   */
+            /* deck supports SYNCH but not CHECKING.                 */
+            /*                                                       */
+            /* Note that the SYNCH code supports execution of malloc */
+            /* and free by interrupt handlers, but does not permit   */
+            /* true asynchronous or interleaved execution.  (These   */
+            /* restrictions are also imposed by the stack manager.)  */
+            /*********************************************************/
+
+/*****
+#define CHECKING -- to enable overlay checking & easier dump reading
+#define SYNCH    -- to enable self-synchronization
+*****/
+
+struct HBH {                         /* Heap Block Header structure  */
+   unsigned size;                    /* the size of the heap block   */
+                                     /* (not including overhead)     */
+#ifdef SYNCH
+   int resv;                         /* this block (on the free      */
+                                     /* chain) is allocated or being */
+                                     /* allocated                    */
+   struct HB * pend;                 /* chain field for pending free */
+                                     /* queue                        */
+#endif
+#ifdef CHECKING
+   char label [4] ;                  /* an eye-catcher of HEAP/FREE  */
+#else
+   struct HB *chain;                 /* next free block              */
+#endif
+};
+
+struct HB {                          /* Heap Block structure         */
+   struct HBH header;                /* block header                 */
+   char block;                       /* first byte of available space*/
+};
+
+#ifdef CHECKING
+struct HBT {                         /* Heap Block Trailer structure */
+   char label [4] ;                  /* an eye-catcher of HEAP/FREE  */
+   struct HB *chain;                 /* next free block              */
+};
+#endif
+
+struct HTH {                         /* Heap Tract Header structure  */
+   unsigned size;                    /* size of tract                */
+#ifdef SYNCH
+   int busy;                         /* number of active malloc/free */
+                                     /* calls                        */
+   struct HB * pend;                 /* head of pending free queue   */
+#endif
+   struct HB *free;                  /* first free block             */
+};
+
+struct CRAB_t {                      /* A brief CRAB mapping         */
+   int _1 [5] ;
+   union {
+      struct HTH *HINT;              /* Heap INformation Table       */
+                                     /* *** NOTE: This address is    */
+                                     /*     used for a different     */
+                                     /*     purpose by the full      */
+                                     /*     runtime library          */
+      int HSIZ;                      /* requested heap size |        */
+                                     /*     0x80000000               */
+   } HINF;
+};
+
+                                     /* macro to issue user ABEND    */
+#ifndef CICS                                                  /* 5.0 */
+#define ABEND(code) (_ldregs(R1, 0x80000000 | code), _ossvc(13))
+#endif                                                        /* 5.0 */
+
+#define HEAPSIZE 16384               /* default size of heap tract --*/
+                                     /*   may be freely altered      */
+
+extern void free();  /* forward */
+#eject
+            /*********************************************************/
+            /* The following macros improve readability of the code  */
+            /* and cut down on the number of #ifdef's.  Meanings:    */
+            /*   OVERHEAD:  The space overhead per block             */
+            /*   next:      The next block on the free queue         */
+            /*   endof:     The trailer for a block                  */
+            /*   after:     The next block in physical memory        */
+            /*   DO_CS:     compare-and-swap(targ, old, new), return */
+            /*                 CS condition code                     */
+            /*   RESV:      Reserve a block if not reserved, return  */
+            /*                 previous status                       */
+            /*   DEQ:       Remove a block from the free queue and   */
+            /*                 unreserve it, return previous status  */
+            /*   DEQ0:      Like DEQ, but for first block on queue   */
+            /*********************************************************/
+
+#ifdef CHECKING
+#define OVERHEAD (sizeof(struct HBH) + sizeof(struct HBT))
+#else
+#define OVERHEAD sizeof(struct HBH)
+#endif
+
+#ifdef CHECKING
+#define next(b) (((struct HBT *)(&(b)->block+(b)->header.size))->chain)
+#define endof(b) ((struct HBT *) (&(b)->block+(b)->header.size))
+#define after(b) ((struct HB *)(&(b)->block+(b)->header.size+ \
+                   sizeof(struct HBT)))
+#else
+#define next(b) ((b)->header.chain)
+#define after(b) ((struct HB *)(&(b)->block+(b)->header.size))
+#endif
+
+#ifdef SYNCH
+#define DO_CS(targ, old, new) (_ldregs(R0+R1+R15, old, &(targ), new), \
+                               CS(0, 15, 0+b(1)), _cc())
+#define RESV(bl) DO_CS((bl)->header.resv, 0, 1)
+#define DEQ(bl, pr) (next(pr) = next(bl), rt = (bl)->header.resv, \
+                     (bl)->header.resv = 0, rt)
+#define DEQ0(bl) (CRAB->HINF.HINT->free = next(bl), \
+                  rt = (bl)->header.resv, \
+                  (bl)->header.resv = 0, rt)
+#else                                                        /* 5.00 */
+#define DEQ(bl, pr) next(pr) = next(bl)                      /* 5.00 */
+#define DEQ0(bl) CRAB->HINF.HINT->free = next(bl)            /* 5.00 */
+#endif
+
+            /*********************************************************/
+            /* Use pragma map to make the external names for malloc  */
+            /* free $MALLOC and $FREE.  This will allow additional   */
+            /* regular library routines, such as calloc and strsave, */
+            /* to be used with SPE.                             5.00 */
+            /*********************************************************/
+
+#pragma map(malloc, "$MALLOC")                               /* 5.00 */
+#pragma map(free, "$FREE")                                   /* 5.00 */
+
+#title malloc -- allocate a block of memory
+#eject
+/*-------------------------------------------------------------------
+ * ENTRY:      <=== malloc
+ * PURPOSE:    <=== Allocate a memory block of a given size.
+ * USAGE:      <===
+ *                  area = malloc(size);
+ *
+ * ARGUMENTS:  <===
+ *    -ARG-    -DCL--------- -DESCRIPTION-
+ *    size     unsigned      The amount of memory to allocate
+ *
+ * RETURNS:    <===
+ *    area     void *        A pointer to the allocated memory, or 0
+ *                           if none could be allocated
+ *
+ * NOTES:      <=== This routine may be modified by the user
+ *
+ * END
+ *-----------------------------------------------------------------*/
+#eject
+void * malloc(amt)
+   unsigned amt;
+   {
+            /*********************************************************/
+            /* This implementation of malloc uses a best-fit alg-    */
+            /* orithm.  For some applications, first-fit, which      */
+            /* increases fragmentation but may decrease the time     */
+            /* spent searching queues, may be more appropriate.  This*/
+            /* algorithm may not be suited to large or specialized   */
+            /* applications, but it is very convenient for small or  */
+            /* medium-sized ones.  THIS ALGORITHM HAS VERY LITTLE    */
+            /* RELATIONSHIP TO THE FULL RUNTIME LIBRARY'S MALLOC,    */
+            /* WHICH IS SIGNIFICANTLY MORE COMPLICATED AND GENERAL.  */
+            /*                                                       */
+            /* If the SYNCH symbol is defined, allocated blocks may  */
+            /* be left on the "free" queue, to avoid perturbing queue*/
+            /* rechaining by an interrupted malloc or free.          */
+            /*********************************************************/
+
+      register unsigned need = (amt + 7) & ~7;
+                                     /* round up amount to doubleword*/
+      unsigned fit = 0xffffffff;     /* any fit is better than none  */
+      register struct HB *fblk, *best = 0, *prev = 0, *pbest = 0;
+#ifdef CHECKING
+      struct HBT *blkend;            /* end of block work variable   */
+#endif
+      struct CRAB_t *CRAB =
+          (struct CRAB_t *) (_ldregs(0), _stregs(R12));       /* 4.5 */
+                                     /* store the CRAB address       */
+      struct HTH *tract;             /* address of the heap tract    */
+#ifdef SYNCH
+      int irupt;                     /* >0 if recursive call (via    */
+                                     /* interrupt)                   */
+#endif
+
+      if (!amt) return(0);           /* if nothing wanted, return    */
+                                     /* nothing                      */
+
+            /*********************************************************/
+            /* All malloc allocations are made from a single storage */
+            /* tract, which is obtained from the operating system by */
+            /* the first call to malloc.  The tract is freed by      */
+            /* L$UMAIN during program termination.                   */
+            /*                                                       */
+            /* The size of the heap tract may be specified via the   */
+            /* extern _HEAP.  If specified, this value is copied by  */
+            /* L$UMAIN into CRABHINT, and flagged with a x80 in the  */
+            /* high-order byte.                                      */
+            /*********************************************************/
+
+      if (CRAB->HINF.HSIZ <= 0)      /* if no tract yet allocated    */
+         {
+            int hsiz = CRAB->HINF.HSIZ;
+                                     /* original contents of CRABHINT*/
+            unsigned tsize;          /* heap tract size              */
+
+            tsize = hsiz & 0x7fffffff;
+            if (!tsize) tsize = HEAPSIZE;
+                                     /* determine required tract size*/
+            tsize = (tsize+7) & 0xfffffff8;
+                                     /* round up to double word      */
+#ifdef CMS
+#ifdef BIMODAL
+            CMSSTOR_OBT(tsize, &tract, "", LOC_SAME, ERR_ABN);/* 4.5 */
+#else
+            DMSFREE(tsize/8, &tract, FREE_DEF, ERR_ABN);
+#endif
+                                     /* get one from CMS             */
+#else
+#ifdef CICS                                                   /* 5.0 */
+            #pragma options push copts                        /* 5.0 */
+            #pragma options copts(noexclude)                  /* 5.0 */
+            EXEC CICS GETMAIN SET(tract) FLENGTH(tsize) NOEDF;/* 5.0 */
+            #pragma options pop copts                         /* 5.0 */
+#else                                                         /* 5.0 */
+/*===================================================================*/
+/* INT */
+            tract = GETSTOR(tsize);
+/*          tract = GETMAIN_U(tsize, 0, 0); */
+/*===================================================================*/
+                                     /* get one from OS              */
+#endif                                                        /* 5.0 */
+#endif
+            tract->size = tsize;     /* save size for free           */
+            fblk = (struct HB *)((char *) tract + sizeof(struct HTH));
+                                     /* put all of tract but header  */
+                                     /* on the free queue            */
+            tract->free = fblk;
+            fblk->header.size = tsize - sizeof(struct HTH) -
+                                   OVERHEAD;
+            next(fblk) = 0;
+#ifdef CHECKING
+            memcpy(fblk->header.label, "FREE", 4);
+            memcpy(endof(fblk)->label, "FREE", 4);
+#endif
+#ifdef SYNCH
+            /*********************************************************/
+            /* An interrupt handler might have allocated a tract     */
+            /* after we checked above.  If so, return ours to the    */
+            /* system and use its.                                   */
+            /*********************************************************/
+
+            fblk->header.resv = 0;                            /* 4.5 */
+            if (DO_CS(CRAB->HINF.HINT, hsiz, tract))
+                                     /* store HINT address if still  */
+                                     /* not 0                        */
+               {
+#ifdef CMS
+#ifdef BIMODAL
+                  CMSSTOR_REL(tsize, tract, "", REL_DEF, ERR_ABN);
+                                                              /* 4.5 */
+#else
+                  DMSFRET(tsize/8, tract, FREE_DEF, ERR_ABN); /* 4.5 */
+#endif
+#else
+#ifdef CICS                                                   /* 5.0 */
+                  EXEC CICS FREEMAIN DATA(tract) NOEDF;       /* 5.0 */
+#else                                                         /* 5.0 */
+                  FREEMAIN(tract, tsize, 0, 0);
+#endif
+#endif                                                        /* 5.0 */
+               }
+#else
+            CRAB->HINF.HINT = tract; /* install HTH address for      */
+                                     /* future use                   */
+#endif
+         }
+
+#ifdef SYNCH
+            /*********************************************************/
+            /* Note in the HTH that malloc/free is running.  Because */
+            /* any interrupt must complete before return, CS is not  */
+            /* required here.                                        */
+            /*********************************************************/
+
+      irupt = CRAB->HINF.HINT->busy++;    /* show malloc/free active */
+#endif
+
+search:     /*********************************************************/
+            /* Perform a best-fit search of the free blocks, skipping*/
+            /* any reserved/allocated blocks, and halting if an exact*/
+            /* fit is found.                                         */
+            /*                                                       */
+            /* Variable usage:                                       */
+            /*   fblk -- currently considered block                  */
+            /*   prev -- free block queued before fblk               */
+            /*   best -- block with best fit so far                  */
+            /*   pbest -- free block queued before best              */
+            /*   fit  -- size of best block                          */
+            /*********************************************************/
+
+      for (fblk = CRAB->HINF.HINT->free; fblk; prev = fblk,
+                                               fblk = next(fblk))
+         {
+#ifdef SYNCH
+            if (fblk->header.resv) continue;
+                                     /* skip reserved blocks         */
+#endif
+            if (fblk->header.size == need) break;
+                                     /* stop for exact fit           */
+            if (fblk->header.size > need && fblk->header.size < fit)
+                                     /* if this is a better fit than */
+                                     /* the last one                 */
+               {
+                  fit = fblk->header.size;
+                  best = fblk;       /* note it for later            */
+                  pbest = prev;
+               }
+         }
+
+      if (!fblk)                     /* if the entire queue was run  */
+         if (!best) goto leave;      /* return 0 if no fit found     */
+         else
+            {
+               fblk = best;          /* select best block            */
+               prev = pbest;
+            }
+
+#ifdef SYNCH
+            /*********************************************************/
+            /* Reserve the selected block, making it out of bounds   */
+            /* for an interrupting malloc.  If the reserve fails, it */
+            /* was stolen from us by an interruption, and we must do */
+            /* the search again.                                     */
+            /*********************************************************/
+
+      if (RESV(fblk)) goto search;   /* reserve block or search again*/
+#endif
+#ifdef CHECKING
+      if (memcmp(fblk->header.label, "FREE", 4))
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1206") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1206);
+         #endif                                               /* 5.0 */
+      if (memcmp(endof(fblk)->label, "FREE", 4))
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1206") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1206);
+         #endif                                               /* 5.0 */
+                                     /* make sure block is free      */
+#endif
+      fit = fblk->header.size;       /* get size of block    /* 5.00 */
+#ifdef SYNCH
+            /*********************************************************/
+            /* Maybe a piece of this block was stolen by an interrupt*/
+            /* and it is no longer big enough.  If so, try again,    */
+            /* but remember to unreserve this one first.             */
+            /*********************************************************/
+
+      if (fit < need) {              /* if not enough                */
+         fblk->header.resv = 0;      /* make available once more     */
+         goto search;                /* go search again              */
+      }
+#endif
+
+            /*********************************************************/
+            /* If the selected block is larger than the amount needed*/
+            /* but the left-overs are too small to make up a free    */
+            /* block, use the entire block and ignore the waste.     */
+            /*********************************************************/
+
+      if (fit - need <= OVERHEAD)    /* are we close to the minimum? */
+         need = fit;                 /* if so, take it all           */
+      if (need == fit)               /* if entire block will be      */
+                                     /* allocated                    */
+#ifdef SYNCH
+            /*********************************************************/
+            /* If this is an interrupting malloc, do not remove this */
+            /* block from the free queue, as the interuptee may be   */
+            /* modifying or inspecting the chains at this moment.    */
+            /* Instead, leave it reserved, which will keep anyone    */
+            /* else from allocating it.                              */
+            /*********************************************************/
+         {
+            if (!irupt)              /* if not interrupting ourself  */
+               {
+                  if (prev) next(prev) = next(fblk);         /* 5.00 */
+                  else CRAB->HINF.HINT->free = next(fblk);
+                                     /* remove from free queue       */
+                  fblk->header.resv = 0;  /* show block not on queue */
+               }
+         }
+#else
+         if (prev)
+            next(prev) = next(fblk);
+         else
+            CRAB->HINF.HINT->free = next(fblk);
+                                     /* remove from free queue       */
+#endif
+
+            /*********************************************************/
+            /* If the free block is significantly larger than the    */
+            /* amount needed, we allocate only as much as we need,   */
+            /* and leave the rest free.  The new block is allocated  */
+            /* from the high-address end of the block, in order to   */
+            /* leave the free block address unchanged, and thereby   */
+            /* avoid a free queue update.                            */
+            /*********************************************************/
+
+      else                           /* if only some of block will   */
+                                     /* be reallocated               */
+         {
+            struct HB *nblk;
+
+            fit = fit - need - OVERHEAD;
+                                     /* compute amount that will     */
+                                     /* remain                       */
+            nblk = (struct HB *) (&fblk->block + fit
+#ifdef CHECKING
+                                  + sizeof(struct HBT)
+#endif
+                                 );  /* locate new block             */
+            nblk->header.size = need;     /* store block size        */
+#ifdef CHECKING
+            blkend = (struct HBT *) (&fblk->block + fit);
+            blkend->chain = next(nblk);
+                                     /* chain new free block to next */
+            memcpy(blkend->label, "FREE", 4);
+#endif
+            fblk->header.size = fit; /* update new free block...the  */
+                                     /* chains are ok before & after */
+#ifdef SYNCH
+            fblk->header.resv = 0;   /* unreserve free block         */
+            nblk->header.resv = 0;   /* unreserve allocated block -- */
+                                     /* not on the free queue        */
+#endif
+            fblk = nblk;
+         }
+#ifdef CHECKING
+#ifdef SYNCH
+      fblk->header.pend = -1;
+#endif
+      memcpy(fblk->header.label, "HEAP", 4);
+      blkend = (struct HBT *) (&fblk->block + need);
+      memcpy(blkend->label, "HEAP", 4);
+                                     /* mark block as allocated      */
+#endif
+
+leave:
+#ifdef SYNCH
+            /*********************************************************/
+            /* If malloc or free is interrupted by a call to free,   */
+            /* the interrupting call is not immediately honored.     */
+            /* Instead, the block to be freed is ENQ'd on a "pending */
+            /* FREE" queue.  When the inerrupted request is complete,*/
+            /* we lift the pending queue, and then free any addressed*/
+            /* blocks.                                               */
+            /*********************************************************/
+
+      CRAB->HINF.HINT->busy--;       /* decrease busy count          */
+      if (!irupt)                    /* were we the first one in?    */
+         {
+            struct HB *pending, *current;
+
+            for (;;)
+               {
+                  pending = CRAB->HINF.HINT->pend;
+                  if(!pending ||
+                     !DO_CS(CRAB->HINF.HINT->pend, pending, 0))
+                     break;
+                                     /* pick up the pending queue    */
+                                     /* and replace by 0             */
+               }
+            while (pending)          /* if anything was pending      */
+               {
+                  current = pending;
+                  pending = current->header.pend;
+#ifdef CHECKING
+                  current->header.pend = -1;
+#endif
+                  free(&current->block);
+                                     /* free the blocks one at a time*/
+               }
+         }
+#endif
+      return (fblk? &fblk->block: 0);/* return block address, or 0   */
+                                     /* after failure                */
+   }
+
+#title free -- free a block of memory
+#eject
+/*-------------------------------------------------------------------
+ * ENTRY:      <=== free
+ * PURPOSE:    <=== Free a memory block allocated with malloc.
+ * USAGE:      <===
+ *                  free(area);
+ *
+ * ARGUMENTS:  <===
+ *    -ARG-    -DCL--------- -DESCRIPTION-
+ *    area     void *        The area to be freed
+ *
+ * RETURNS:    <=== void
+ *
+ * NOTES:      <=== This routine may be modified by the user
+ *
+ *                  Karl Malx says:  "How come to free a block, you
+ *                                    put it in chains?"
+ *
+ * END
+ *-----------------------------------------------------------------*/
+#eject
+void free(blk)
+   void *blk;
+   {
+      register struct HB *elt, *fblk;
+      register struct HB *prev = 0, *prev2 = 0;
+      struct CRAB_t *CRAB =
+          (struct CRAB_t *) (_ldregs(0), _stregs(R12));       /* 4.5 */
+#ifdef CHECKING
+      struct HBT *blkend;
+#endif
+#ifdef SYNCH
+      int rt;                        /* work var for DEQ macros      */
+      int irupt;                     /* >0 if recursive call (via    */
+                                     /* interrupt)                   */
+#endif
+
+      if (!blk) return;              /* allow and ignore free(0)     */
+      if (CRAB->HINF.HSIZ <= 0)
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1208") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1208);
+         #endif                                               /* 5.0 */
+                                     /* if nothing has been malloc'd */
+                                     /* yet, this call is absurd     */
+      elt = (struct HB *)((char *) blk - sizeof(struct HBH));
+                                     /* find header for block to free*/
+#ifdef CHECKING
+      if (memcmp(elt->header.label, "HEAP", 4))
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1208") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1208);
+         #endif                                               /* 5.0 */
+      blkend = endof(elt);
+      if (memcmp(blkend->label, "HEAP", 4))
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1208") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1208);
+         #endif                                               /* 5.0 */
+                                     /* if the eye-catchers aren't   */
+                                     /* there, caller is confused,   */
+                                     /* or memory is overlaid        */
+#ifdef SYNCH
+      if (DO_CS(elt->header.pend, -1, 1))
+         #ifdef CICS                                          /* 5.0 */
+         EXEC CICS ABEND ABCODE("1208") NOEDF;                /* 5.0 */
+         #else                                                /* 5.0 */
+         ABEND(1208);
+         #endif                                               /* 5.0 */
+                                     /* if free is pending for block */
+                                     /* avoid loop in pending queue  */
+#endif
+#endif
+
+#ifdef SYNCH
+            /*********************************************************/
+            /* If we're interrupting another malloc/free, it's unsafe*/
+            /* to free anything right now.  So we just put this block*/
+            /* on a pending free queue, and someone will free it when*/
+            /* convenient.                                           */
+            /*********************************************************/
+
+      irupt = CRAB->HINF.HINT->busy++;    /* increment busy count    */
+      if (irupt)                     /* if we're interrupting        */
+         {
+            for (;;)
+               {
+                  struct HB * pblk;
+                  pblk = elt->header.pend = CRAB->HINF.HINT->pend;
+                  if (!DO_CS(CRAB->HINF.HINT->pend, pblk, elt))
+                     break;          /* add block to pending queue   */
+                                     /* atomically and safely        */
+               }
+            CRAB->HINF.HINT->busy--; /* decrement busy count         */
+            return;
+         }
+#endif
+
+            /*********************************************************/
+            /* The free queue is ordered by block address, from      */
+            /* highest to lowest.  This facilitates merging adjacent */
+            /* free blocks.  Find the two free blocks before and     */
+            /* the one after (in free queue order), the one to be    */
+            /* freed.  If SYNCH is defined, the block to be freed    */
+            /* may itself be on the free queue.                      */
+            /*********************************************************/
+
+      for (fblk = CRAB->HINF.HINT->free; fblk >= elt; fblk = next(fblk))
+                                     /* search queue for insertion   */
+                                     /* point                        */
+         {
+            prev2 = prev;
+#ifdef SYNCH
+            if (fblk != elt)         /* skip over ourselves          */
+#endif
+            prev = fblk;
+         }
+
+#ifdef SYNCH
+            /*********************************************************/
+            /* Barring memory overlay, the resv field of the header  */
+            /* indicates whether the block to be freed is on the     */
+            /* free queue.  If it is, take it off the queue, so we   */
+            /* only have one case to deal with, even though we're    */
+            /* about to put it right back on.                        */
+            /*********************************************************/
+
+      if (elt->header.resv)          /* is block on free queue?      */
+         {
+#ifdef CHECKING
+            if ((prev? next(prev) : CRAB->HINF.HINT->free) != elt)
+                                     /* is it chained correctly?     */
+                                     /* if not, probable overlay     */
+               #ifdef CICS                                    /* 5.0 */
+               EXEC CICS ABEND ABCODE("1208") NOEDF;          /* 5.0 */
+               #else                                          /* 5.0 */
+               ABEND(1208);
+               #endif                                         /* 5.0 */
+#endif
+            if (!prev) CRAB->HINF.HINT->free = fblk;
+            else next(prev) = fblk;  /* remove from free queue       */
+            elt->header.resv = 0;    /* show no longer there         */
+         }
+#endif
+
+            /*********************************************************/
+            /* If the block to be freed is adjacent to the previous  */
+            /* one on the queue, merge them.  This makes it more     */
+            /* likely that a larger request will be satisfied;       */
+            /* HOWEVER, it increases the amount of processing if     */
+            /* elements of the same size are frequently freed and    */
+            /* reallocated.  It also slightly increases the chances  */
+            /* of an allocation failure for a request from an inter- */
+            /* rupt handler, since it causes memory to be reserved   */
+            /* in bigger chunks.  (In other words, you might want to */
+            /* change this, depending on your application.)          */
+            /*                                                       */
+            /* If SYNCH is defined, the previous element may not     */
+            /* actually be free.  Obviously, we'd better not merge   */
+            /* with it, in this case.  As a side effect of our       */
+            /* processing here, such an element will be removed      */
+            /* from the free queue, which is good on general         */
+            /* principles, and its resv will be reset to 0.          */
+            /*********************************************************/
+
+      if (after(elt) == prev)        /* following element also free? */
+#ifdef SYNCH
+            /*********************************************************/
+            /* Note that DEQ/DEQ0 below do not test the resv field   */
+            /* until the block is removed from the free queue, at    */
+            /* which point no interruptor will change it.            */
+            /*********************************************************/
+
+         if (prev2? DEQ(prev, prev2): DEQ0(prev))
+                                     /* if so, DEQ it, is it really, */
+                                     /* truly free?                  */
+            prev = prev2;            /* if not, don't merge          */
+         else
+            {                                                /* 5.00 */
+#else                                                        /* 5.00 */
+            {                                                /* 5.00 */
+               if (prev2) DEQ(prev, prev2);                  /* 5.00 */
+               else DEQ0(prev);                              /* 5.00 */
+                                     /* remove block from free queue */
+#endif
+               elt->header.size += prev->header.size + OVERHEAD;
+                                     /* combine the free blocks      */
+#ifdef CHECKING
+
+            /*********************************************************/
+            /* The eye-catchers in the merged blocks are changed from*/
+            /* HEAP/FREE to COAL (esce).  This is primarily to avoid */
+            /* confusion for dump readers.                           */
+            /*********************************************************/
+
+               memcpy(blkend->label, "COAL", 4);
+               memcpy(prev->header.label, "COAL", 4);
+#endif
+               prev = prev2;         /* grandfather block is now     */
+                                     /* father                       */
+            }
+
+      if (fblk && after(fblk) == elt)/* merge with previous block if */
+                                     /* free                         */
+#ifdef SYNCH
+         if (!(prev? DEQ(fblk, prev): DEQ0(fblk)))
+                                     /* take it off the free queue,  */
+                                     /* merge if truly free          */
+            {                                                /* 5.00 */
+#else                                                        /* 5.00 */
+            {                                                /* 5.00 */
+               if (prev) DEQ(fblk, prev);                    /* 5.00 */
+               else DEQ0(fblk);                              /* 5.00 */
+                                     /* take off free queue & merge  */
+#endif
+#ifdef CHECKING
+               memcpy(elt->header.label, "COAL", 4);
+               memcpy(endof(fblk)->label, "COAL", 4);
+#endif
+               fblk->header.size += elt->header.size + OVERHEAD;
+                                     /* coalesce the block           */
+               elt = fblk;           /* store new adress of start of */
+                                     /* block to free                */
+            }
+
+#ifdef CHECKING
+      memcpy(elt->header.label, "FREE", 4);
+      memcpy(endof(elt)->label, "FREE", 4);
+                                     /* update eye-catchers          */
+#endif
+      if (!prev)                     /* if freed block is highest    */
+         {
+            next(elt) = CRAB->HINF.HINT->free;
+            CRAB->HINF.HINT->free = elt;  /* put first on queue      */
+         }
+      else
+         {
+            next(elt) = next(prev);
+            next(prev) = elt;        /* else insert within queue     */
+         }
+
+#ifdef SYNCH
+      CRAB->HINF.HINT->busy = 0;     /* show we're no longer busy    */
+      {
+         struct HB *pending, *current;
+
+         for (;;)
+            {
+               pending = CRAB->HINF.HINT->pend;
+               if(!pending || !DO_CS(CRAB->HINF.HINT->pend, pending, 0))
+                  break;             /* check for pending frees from */
+                                     /* interrupt                    */
+            }
+         while (pending)
+            {
+               current = pending;
+               pending = current->header.pend;
+#ifdef CHECKING
+               current->header.pend = -1;
+#endif
+               free(&current->block);/* and do them before return    */
+            }
+      }
+#endif
+   }

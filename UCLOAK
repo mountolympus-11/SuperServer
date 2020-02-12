@@ -1,0 +1,93 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdio.h>
+#include <stddef.h>
+#include "cloaktbl.h"
+
+typedef  unsigned char Uchar ;
+#ifndef USHORT
+#define USHORT unsigned short
+#define ULONG unsigned long
+#endif
+
+/* ****************************************************************
+
+   Function:  ucloak
+
+   Description:
+
+
+
+
+
+   Method:
+
+
+      These routines operate on either ASCII or EBCDIC data
+      representations.
+
+
+   Parameters:
+
+      char   *clkbuf  - text block origin
+      short  clklen   - text block length
+      char   *txt     - transparent data block origin
+      short  txtlen   - transparent data block length
+      short  basebits - # of significant bits per byte
+
+   **************************************************************** */
+
+int ucloak( char *clkbuf, short clklen,
+            char *txt,    short txtlen,
+            short basebits ) {
+
+    unsigned char val, rval, *x, *t, *tbl;
+    unsigned short reqlen, rbits, y;
+
+    reqlen = (USHORT) ( ( (ULONG) clklen * (ULONG) basebits ) / 8L ) ;
+    if ( !reqlen ÝÝ txtlen < reqlen )
+        return -reqlen ;
+
+    tbl = (('A' > 'a') ? EBCT : ASCT) ;
+
+    t     = txt ;
+    x     = clkbuf ;
+    rbits = 0 ;
+    rval  = 0x00 ;
+
+    while ( clklen-- ) {
+
+        val = tblí*x++ù ;
+
+        if (rbits + basebits >= 8) {
+            y      = basebits - (8 - rbits) ;
+            *t++   = rval Ý (val >> y) ;
+            rval   = val << (8 - y) ;
+            rbits  = y ;
+        }
+        else {
+            rval  Ý= val << ((8 - basebits) - rbits) ;
+            rbits += basebits ;
+        }
+    }
+
+    return t - txt ;
+
+}
+

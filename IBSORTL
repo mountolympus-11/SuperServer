@@ -1,0 +1,97 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include "env.h"
+
+#define   BUFRMAX    160          /* max. bytes allowed for each slot */
+
+/* ******************************************************************
+
+    Function: bubsort
+
+    Description:
+
+        This function sorts by the key specified in the function
+        in ascending order using a bubble sort algorithm.
+
+    Returns:
+
+        0  - sort is successful
+        1  - sort failed due to storage exceeds capacity
+
+   ****************************************************************** */
+
+int bubsort ( void *table, int count, int len, int (*func)() ) {
+
+    void  *slot1, *slot2 ;
+    int   i, j, offset, changed = TRUE ;
+    char  buffríBUFRMAXù ;
+
+    if ( len > BUFRMAX )
+        return 1 ;
+
+    if ( len > 255 )  {
+
+        for ( i=count ; i && changed ; i-- )  {
+
+            changed = FALSE ;
+
+            for ( j=0 ; j< i-1 ; j++ )  {
+
+                offset  = len * j ;
+                slot1 = ( ( char *) table + offset ) ;
+                slot2 = ( ( char *) slot1 + len ) ;
+
+                if ( (func) ( slot1, slot2 ) > 0 ) {
+                    memcpy( buffr, slot1, (short)len ) ;
+                    memcpy( slot1, slot2, (short)len ) ;
+                    memcpy( slot2, buffr, (short)len ) ;
+                    changed = TRUE ;
+                }
+            }
+        }
+    }
+
+    else  {
+
+        for ( i=count ; i && changed ; i-- )  {
+
+            changed = FALSE ;
+
+            for ( j=0 ; j< i-1 ; j++ )  {
+
+                offset  = len * j ;
+                slot1 = ( ( char *) table + offset ) ;
+                slot2 = ( ( char *) slot1 + len ) ;
+
+                if ( (func) ( slot1, slot2 ) > 0 ) {
+                    memcpy( buffr, slot1, (char)len ) ;
+                    memcpy( slot1, slot2, (char)len ) ;
+                    memcpy( slot2, buffr, (char)len ) ;
+                    changed = TRUE ;
+                }
+            }
+        }
+    }
+
+    return 0 ;
+}
+

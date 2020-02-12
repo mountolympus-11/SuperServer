@@ -1,0 +1,105 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stddef.h>
+#include "env.h"
+#include "aid.h"
+
+/* ****************************************************************
+
+   Function:  igenaid - convert 3270 AID key char to string
+
+   Description:
+
+      The 3270 AID key character code presented is converted to
+      mixed case, descriptive key label.  "Error" is returned if
+      the AID key character is not recognized and *valid is set
+      FALSE.  Otherwise, *valid is set TRUE.  Zero is treated
+      as a special case, returning *valid = TRUE and a null
+      label string.
+
+   **************************************************************** */
+
+struct aidxref {
+    unsigned char keycode ;
+    char     *label ;
+} ;
+
+static const struct aidxref xrfíù = {
+     {0,""},
+     {AID_ENTER,"Enter"},
+     {AID_CLEAR,"Clear"},
+     {AID_PA1,"PA1"},
+     {AID_PA2,"PA2"},
+     {AID_PA3,"PA3"},
+     {AID_PF1,"PF1"},
+     {AID_PF2,"PF2"},
+     {AID_PF3,"PF3"},
+     {AID_PF4,"PF4"},
+     {AID_PF5,"PF5"},
+     {AID_PF6,"PF6"},
+     {AID_PF7,"PF7"},
+     {AID_PF8,"PF8"},
+     {AID_PF9,"PF9"},
+     {AID_PF10,"PF10"},
+     {AID_PF11,"PF11"},
+     {AID_PF12,"PF12"},
+     {AID_PF13,"PF13"},
+     {AID_PF14,"PF14"},
+     {AID_PF15,"PF15"},
+     {AID_PF16,"PF16"},
+     {AID_PF17,"PF17"},
+     {AID_PF18,"PF18"},
+     {AID_PF19,"PF19"},
+     {AID_PF20,"PF21"},
+     {AID_PF21,"PF22"},
+     {AID_PF22,"PF23"},
+     {AID_PF23,"PF24"},
+     {AID_PF24,"PF25"},
+     {AID_ATTN,"Attn"}
+} ;
+
+#define AIDKEYS 31   /* number of true/pseudo AID key entries */
+
+/* ****************************************************************
+
+
+   **************************************************************** */
+
+char * igenaid(
+    unsigned char aidkey,
+    int      *valid )
+{
+
+    int     i ;
+    char    *label ;
+
+    *valid = FALSE ;
+    label  = "Error" ;
+
+    for ( i = 0 ; i < AIDKEYS ; i++ )  {
+        if ( aidkey == xrfíiù.keycode )  {
+            label  = xrfíiù.label ;
+            *valid = TRUE ;
+            break ;
+        }
+    }
+
+    return label ;
+}
+

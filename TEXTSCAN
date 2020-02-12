@@ -1,0 +1,417 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include <ctype.h>
+#include "env.h"
+#include "attrib.h"
+#include "convert.h"
+#include "systbls.h"
+#include "region.h"
+#include "rgnprv.h"
+#include "textscan.h"
+
+#define WILDCARD    '*'
+
+/* ******************************************************************
+
+    Function:  scan rectangle for string
+
+    Description:
+
+        This function searches a rectangular buffer for a string
+        matching the input text.  The text can consist of a character
+        string with or without case sensitivity or a pattern mask.
+        The rectangle may be searched forwards, moving from left to
+        right, top to bottom - or backwards, moving from right to
+        left, bottom to top.
+
+        When pattern matching is specified via the SCAN_PATTERN
+        option, either of two formats of the wildcard characters
+        is selected based on the content of the pattern string.
+        The first format uses standard American code points for
+        the wildcard characters.  If non-printables are found in
+        the pattern string, it is assumed that the alternate code
+        points for these characters are used, as defined in
+        TEXTSCAN.H.  This option was introduced to support pattern
+        matching when the host character set is other than standard
+        American ASCII.
+
+
+    Notes:
+
+        row_offset, row_width
+
+    Entry:
+
+        struct textscanp *
+
+    Returns:
+
+        When a matching string is found as indicated by RC > 0,
+        the textscanp return values are completed with the string
+        origin, length and row/column coordinates, each ranging from
+        1 - N.
+
+           -1  - insufficient memory
+            0  - string not found
+        N > 0  - length of matching string
+
+   ****************************************************************** */
+
+/* ******************************************************************
+
+    Maintenance Log:
+
+       03/11/94 - R. Turgeon
+                  VERSION operand added to PATMIN and PATMATCH to
+                  define synonymns for the pattern matching wildcard
+                  characters.
+
+       01/21/95 - R. Turgeon
+                  converted isattrx() function to a macro avoiding
+                  the high linkage cost in the two loops in which
+                  it occurs.
+
+   ****************************************************************** */
+
+int textscan( struct textscanp *tsp )  {
+
+    int  i, found = FALSE, length = 0 ;
+    int  colincr, rowincr, startrow, startat, endat ;
+    int  patlen, plen, offset, twidth ;
+    int  version = 0 ;
+
+    char *aux = 0 ;             /* IGNORECASE workareas               */
+    char *lower ;               /* source text in lower case          */
+    char *cvarea ;              /* candidate string conversion area   */
+
+    char *buffer, *tbuff, *bufend, *buflim ;
+    char *rowp, *rowend ;
+    char *resume ;
+    char *p ;
+    char opts ;
+
+    enum { TEXTASIS, TEXTUPLO, PATTERN } type ;
+
+/* ------------------------------------------------------------------
+      analyze search type
+   ------------------------------------------------------------------ */
+
+    opts   = tsp->opts ;
+    patlen = tsp->textlen ;
+    resume = tsp->resume ;
+    buffer = tsp->buffer ;
+
+    offset = tsp->row_offset ;
+    twidth = tsp->row_width ;
+    tbuff  = tsp->buffer - offset ;
+    bufend = tbuff + tsp->rows * twidth ;
+
+    if ( ! tsp->rows || ! tsp->cols || ! patlen       ||
+        ( tsp->textlen > tsp->cols )                  ||
+        ( tsp->onlyrow > tsp->rows )                  ||
+        ( tsp->onlycol > tsp->cols )                  ||
+        ( resume && ( resume < buffer || resume >= bufend ) ) )
+
+        return 0 ;
+
+/* ------------------------------------------------------------------ */
+
+    if ( opts & SCAN_TEXT )
+        type = TEXTASIS ;
+
+    if ( opts & SCAN_IGNORECASE )
+        type = TEXTUPLO ;
+
+    if ( opts & SCAN_PATTERN )  {
+        type = PATTERN ;
+
+        for ( i = 0, p = tsp->text ; i < patlen ; i++, p++ )
+            if ( ! isprint( *p ) )  {
+                version = 1 ;
+                break ;
+            }
+    }
+
+    if ( opts & SCAN_NONPRINTB && memchr( tsp->text, ' ', patlen ) )
+        type = PATTERN ;
+
+/* ------------------------------------------------------------------
+      acquire auxilliary workareas if needed
+   ------------------------------------------------------------------ */
+
+    if ( type == TEXTUPLO || type == PATTERN )  {
+        if ( ! (aux = malloc( 2 * (patlen + 1) ) ) )
+            return -1 ;
+
+        cvarea = aux ;
+        *(cvarea + patlen) = 0 ;
+
+        if ( type == PATTERN )  {
+            memcpy( cvarea, tsp->text, patlen ) ;
+            patlen = patmin( cvarea, version ) ;
+        }
+
+        else if ( type == TEXTUPLO )  {
+            lower = cvarea + patlen + 1 ;
+            *(lower + patlen) = 0 ;
+            memcpy( lower, tsp->text, patlen ) ;
+            strlwr( lower ) ;
+        }
+    }
+
+/* ------------------------------------------------------------------
+      set scan parameters for forward or backward search
+   ------------------------------------------------------------------ */
+
+    if ( opts & SCAN_BACKWARDS )       {
+        colincr  = -1 ;
+        rowincr  = -twidth ;
+        buflim   = tsp->buffer + rowincr ;
+        startat  = tsp->cols - patlen + 1 ;
+        endat    = -1 ;
+        startrow = tsp->rows ;
+    }
+
+    else  {
+        colincr  = 1 ;
+        rowincr  = twidth ;
+        buflim   = buffer + rowincr * tsp->rows ;
+        startat  = -1 ;
+        endat    = tsp->cols - patlen + 1 ;
+        startrow = 1 ;
+    }
+
+    if ( tsp->onlyrow )
+        startrow = tsp->onlyrow ;
+
+    if ( tsp->onlycol )  {
+        startat = (tsp->onlycol - 1) - colincr ;
+        endat   = startat + colincr + colincr ;
+    }
+
+    if ( p = tsp->resume )
+        rowp = tbuff + ((p - tbuff) / twidth) * twidth + offset ;
+
+    else  {
+        rowp = tbuff + (startrow - 1) * twidth + offset ;
+        p    = rowp + startat ;
+    }
+
+    if ( tsp->onlyrow )
+        buflim  = rowp + rowincr ;
+
+/* ------------------------------------------------------------------
+    scan columns row by row for token
+   ------------------------------------------------------------------ */
+
+    do  {
+        rowend = rowp + endat ;
+        for ( ; ! found && ((p += colincr) != rowend) ; )  {
+
+            if ( type == TEXTASIS )  {
+                if ( ! memcmp( p, tsp->text, patlen ) )  {
+                    length = patlen ;
+                    found  = TRUE ;
+                }
+            }
+
+            else if ( type == TEXTUPLO ) {
+                memcpy( cvarea, p, patlen ) ;
+                strlwr( cvarea ) ;
+
+                if ( ! strcmp( cvarea, lower ) )  {
+                    length = patlen ;
+                    found  = TRUE ;
+                }
+            }
+
+            else  {
+                plen  = rowp + tsp->cols - p ;
+                length = patmatch( cvarea, p, plen, opts, 0, version ) ;
+                found = length ;
+            }
+        }
+
+        if ( ! found )  {
+            rowp += rowincr ;
+            p     = rowp + startat ;
+        }
+
+    }  while ( ! found && (rowp != buflim) ) ;
+
+/* ------------------------------------------------------------------
+    format matched string for return
+   ------------------------------------------------------------------ */
+
+    if ( found )  {
+        tsp->retptr = p ;
+        tsp->retlen = length ;
+        tsp->retrow = (p - tbuff) / twidth + 1 ;
+        tsp->retcol = (p - rowp) + 1 ;
+    }
+
+    if ( aux )
+        free( aux ) ;
+
+    return length ;
+}
+
+/* ******************************************************************
+
+    Function:  patmin - compute minimum length of pattern match
+
+   ****************************************************************** */
+
+int patmin( char *pat, int version )  {
+
+    int  i, patlen ;
+    char c, wildcard_char ;
+
+    if ( version == 0 )
+        wildcard_char = WILDCARD ;
+    else
+        wildcard_char = patwild_WILDCARD ;
+
+    patlen = strlen( pat ) ;
+
+    for ( i = 0 ; c = *pat++ ; )
+        if ( c == wildcard_char )
+            i++ ;
+
+    return ( patlen - i ) ;
+}
+
+
+/* ******************************************************************
+
+    Function:  patmatch - match candidate text to pattern mask
+
+   ****************************************************************** */
+
+int patmatch(
+    char *pat,
+    char *s,
+    int  slen,
+    char opts,
+    int  depth,
+    int  version )
+
+{
+    int  len, skp, count = 0, match = TRUE ;
+    char c ;
+    char wildcardí2ù = { 0, 0 } ;
+    char walpha, wnumeric, wanynbnw, wany, wwhitesp ;
+    int  v ;
+
+    v = version ;
+
+    if ( v == 0 )  {
+        *wildcard = WILDCARD ;
+        wwhitesp  = ' ' ;
+        walpha    = '@' ;
+        wnumeric  = '#' ;
+        wanynbnw  = '~' ;
+        wany      = '?' ;
+    }
+
+    else  {
+        *wildcard = patwild_WILDCARD ;
+        wwhitesp  = patwild_WHITESP ;
+        walpha    = patwild_ALPHA ;
+        wnumeric  = patwild_NUMERIC ;
+        wanynbnw  = patwild_ANYNBNW ;
+        wany      = patwild_ANY ;
+    }
+
+    if ( ++depth > 7 )
+        return FALSE ;
+
+    for ( ; (c = *pat) && match ; pat++, count++, s++, slen-- )  {
+
+        if ( slen == 0 )  {
+            match = FALSE ;
+            break ;
+        }
+
+        if ( (c == *wildcard) && (opts & SCAN_PATTERN) )
+            break ;
+
+        match = ( c == *s ) ;
+
+        if ( c == ' ' || c == wwhitesp )  {
+            if ( opts & SCAN_NONPRINTB )
+                match = ( ! *s || *s == ' ' || isattrx( *s ) ) ;
+        }
+
+        else if ( opts & SCAN_PATTERN )  {
+
+            if ( c == wnumeric )
+                match = ( *s >= '0' && *s <= '9') ;
+
+            else if ( c == wanynbnw )
+                match = ( *s && *s != ' ' && ! isattrx( *s ) ) ;
+
+            else if ( c == walpha )
+                match = ischarset(*s) && isalpha( *s ) ;
+
+            else if ( c == wany )
+                match = TRUE ;
+        }
+
+        if ( ! match && (opts & SCAN_IGNORECASE) )
+            match = ( tolower(c) == tolower(*s) ) ;
+    }
+
+/* ------------------------------------------------------------------
+    strip out wildcard string and match remainder of pattern
+   ------------------------------------------------------------------ */
+
+    if ( match && slen && (c == *wildcard) && (opts & SCAN_PATTERN) ) {
+
+        len  = strspn( pat, wildcard ) ;
+        skp  = min( len, slen ) ;
+
+        if ( ! *(pat += len) )
+            count += skp ;
+
+        else  {
+            if ( skp == slen )
+                skp-- ;
+
+            do  {
+                match = patmatch(pat, s+skp, slen-skp, opts, depth, v) ;
+
+            }  while ( ! match && skp-- ) ;
+
+            count += skp + match ;
+        }
+    }
+
+/* ------------------------------------------------------------------
+    return matching token length or zero if pattern not matched
+   ------------------------------------------------------------------ */
+
+    if ( match )
+        return count ;
+    else
+        return 0 ;
+}

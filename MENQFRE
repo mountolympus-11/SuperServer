@@ -1,0 +1,91 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "msg.h"
+
+
+/* ******************************************************************
+
+    Function: enqmsg - C implementation of $ENQMSG / IGENMSGQ
+
+   ****************************************************************** */
+
+void enqmsg( MSGBUF *uhdr, MSGBUF **anchor, struct stghdrq *qh )  {
+
+    int    length ;
+    MSGBUF *mhdr ;
+    MSG    *m, *new ;
+
+    if ( ! ( mhdr = *anchor ) )  {
+
+        if ( *anchor = mhdr = stgget( qh, sizeof( MSGBUF ) ) )  {
+            memset( mhdr, 0, sizeof( MSGBUF ) ) ;
+            mhdr->l = (MSG *) &mhdr->f ;
+        }
+    }
+
+    if ( mhdr && uhdr )  {
+
+        for ( m = uhdr->f ; m ; m = m->link )  {
+            length = m->len + sizeof( MSG ) ;
+
+            if  ( new = stgget( qh, length ) )  {
+                memcpy( new, m, length ) ;
+                new->link = 0 ;
+                mhdr->l->link = new ;
+                mhdr->l = new ;
+                mhdr->count++ ;
+                mhdr->used += length ;
+            }
+        }
+
+        memset( uhdr, 0, sizeof( MSGBUF ) ) ;
+    }
+}
+
+
+/* ******************************************************************
+
+    Function: fremsg - C implementation of $FREMSG / IGENMSGF
+
+   ****************************************************************** */
+
+void fremsg( MSGBUF **anchor, struct stghdrq *qh )  {
+
+    int    length ;
+    MSGBUF *mhdr ;
+    MSG    *m, *next ;
+
+    if ( mhdr = *anchor )  {
+
+        for ( m = mhdr->f ; m ; m = next )  {
+            length = m->len + sizeof( MSG ) ;
+            next = m->link ;
+            stgretn( qh, length, m ) ;
+        }
+
+        *anchor = 0 ;
+        stgretn( qh, sizeof( MSGBUF ), mhdr ) ;
+    }
+}
+

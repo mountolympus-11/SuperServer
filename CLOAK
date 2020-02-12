@@ -1,0 +1,96 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdio.h>
+#include <stddef.h>
+#include "cloaktbl.h"
+
+typedef  unsigned char Uchar ;
+#ifndef ULONG
+#define ULONG unsigned long
+#endif
+
+/* ****************************************************************
+
+   Function:  cloak
+
+   Description:
+
+
+
+
+
+   Method:
+
+
+      These routines operate on either ASCII or EBCDIC data
+      representations.
+
+
+   Parameters:
+
+      char   *clkbuf  - text block origin
+      short  clklen   - text block length
+      char   *txt     - transparent data block origin
+      short  txtlen   - transparent data block length
+      short  basebits - # of significant bit per byte
+
+   **************************************************************** */
+
+int cloak( char *txt,    short txtlen,
+           char *clkbuf, short clklen,
+           short basebits ) {
+
+
+    int     rbits, reqlen, y;
+    Uchar   rval, val ;
+    Uchar   *x, *t ;
+
+    reqlen = (((ULONG)txtlen * 8) + basebits - 1) / basebits ;
+    if ( !clklen  ÝÝ  reqlen > clklen )
+        return -reqlen ;
+
+    t     = txt ;
+    x     = clkbuf ;
+    rbits = 0 ;
+    rval  = 0x00 ;
+
+    while ( txtlen ÝÝ rbits )   {
+
+        if (rbits < basebits && txtlen) {
+            txtlen-- ;
+            y     = basebits - rbits ;
+            val   = (rval << y) Ý (*t >> (8 - y)) ;
+            rval  = *t++ & NMASKíy - 1ù ;
+            rbits = (8 - y) ;
+        }
+        else if (rbits >= basebits) {
+            rbits -= basebits ;
+            val    = rval >> rbits ;
+            rval  &= NMASKí8 - rbits - 1ù ;
+        }
+        else {
+            val    = rval << (basebits - rbits) ;
+            rbits  = 0 ;
+        }
+        *x++ = BASEívalù ;
+    }
+
+    return x - clkbuf ;
+}
+

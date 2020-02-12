@@ -1,0 +1,53 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stdarg.h>
+#include <lclib.h>
+
+/* ******************************************************************
+
+    Function: msgfunc - provide independent env for sas vformat
+
+    Description:
+
+       This function provides an INDEP interface to the SAS C
+       vformat function. It provides sprintf-like message formating
+       facilities to assembler language callers, establishing the
+       appropriate C run-time environment on the first call.  The
+       run-time environment is deleted if the function is called
+       with a NULL return area (buffer) ptr.
+
+   ****************************************************************** */
+
+int imsgfnc( char *buffer, char *format, ...)
+
+{
+    int count ;
+    va_list ap ;
+
+    if ( ! buffer )
+        exit ;
+
+    va_start( ap, format ) ;
+    count = vformat( buffer, format, ap ) ;
+    va_end( ap ) ;
+
+    return count ;
+}
+

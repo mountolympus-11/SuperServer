@@ -1,0 +1,54 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include "env.h"
+#include "convert.h"
+#include "systbls.h"
+#include "region.h"
+#include "rgnprv.h"
+
+/* ******************************************************************
+
+    Function: rmxid - locate and identify region locator method
+
+    Description:
+
+        This function accepts a region definition and returns a ptr
+        to the locator method extension and an integer locator method
+        type code.
+
+    Returns:
+
+        0 - missing or invalid locator method
+        n - locator method type
+
+   ****************************************************************** */
+
+int rmxid(
+    struct sysrgn *rgn,         /* sysregions region definition       */
+    struct rmhdr  **rlmeth )    /* return method pointer              */
+
+{
+    if ( ! rgn->meth.len нн ! rgn->meth.offset )
+        return 0 ;
+
+    *rlmeth  = (struct rmhdr *) ( (char *) rgn + rgn->meth.offset ) ;
+    return  ((struct rm2meth *) *rlmeth)->hdr.type ;
+}
+

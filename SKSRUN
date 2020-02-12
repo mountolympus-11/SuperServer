@@ -1,0 +1,1003 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stdlib.h>
+#include <stdarg.h>
+#include "env.h"
+#include "stgmgr.h"
+#include "msg.h"
+#include "attrib.h"
+#include "convert.h"
+#include "systbls.h"
+#include "geometry.h"
+#include "region.h"
+#include "draw.h"
+#include "nav.h"
+#include "vars.h"
+#include "rectcpy.h"
+#include "image.h"
+#include "sks.h"
+#include "navparm.h"
+
+/* ******************************************************************
+
+    Function: sksrun - Apply Runtime SKS to Screen Image
+
+    Description:
+
+      The purpose of this routine is to apply a runtime SKS
+      that was constructed by the sksbld function to the
+      current 3270 session image buffer.
+
+      A runtime SKS is constructed using a recorded syssks
+      and the varaible/region definitions created by the
+      workbench adminstrator.  During a recording process,
+      a basic SKS is constructed using the absolute coordinantes
+      for text insertion.  Phyical cursor position will set
+      the current location for an Erase_EOF statement or text
+      insertion statement.  Using the workbench definition these
+      basic sks statements are either replace or added to with
+      locator and varible insertion runtime SKS statements.
+      The complete set of sks statements include:
+
+          SKSV_CSR   - Establish current (cursor) Position
+          SKSV_EOF   - Erase to end of field
+          SKSV_TEXT  - Text entry at current position
+          SKSV_RGN   - Locate and extract region rectangle
+          SKSV_LOC   - Locate variable/literal using locator method
+          SKSV_VAR   - Insert variable substitution text at currpos
+
+
+    Operation:
+
+      The SKS is applied sequentially.  An initial cursor position
+      must be provided by the caller if the SKS does not explicitly
+      establish current position. (Note, however, that all scripts
+      created by a recording explicitly establish cursor position.)
+      The image buffer provided is modified in place and the ending
+      cursor position is updated in the image strurture.
+
+    Returns:
+
+      Successful application of the SKS to the image buffer results
+      in the return of a null ptr / zero.  If an error is encountered
+      a ptr to the failed SKS statement is returned.
+
+      If an error condition occurs,  messages are added to
+      the message queue provide on input.
+
+    Error conditions:                              Verb
+
+      Invalid cursor positin in CSR stmt           CSR
+      Invalid cursor pos for text or EOF           EOF, TEXT
+      Text insertion failed, prot fld or attrib    TEXT, VAR
+      Region extract failed                        RGN
+      Region not found in image                    RGN
+      Unable to locate Variable/Literal location   LOC
+      Required variable not available in pool      VAR
+      Invalid SKS statement detected               ---
+
+    Maintenance :
+
+      11/15/94  Su-fen Wu    Par# 155474
+                Post error message when the text length exceeds the
+                length defined in variable definition. MSG 012,
+                MSG 013 is added to IMSGS. (text truncation occur)
+
+      12/02/94  Ron Colmone  Par# 158059
+                Added SKS execution trace.
+
+      05/04/95  Ron Colmone  Par# 186795
+                Removed pad character insertion for Variable
+                text insertion logic.
+
+      05/15/95  Ron Colmone  Par# 188430
+                Added support for input area initialization
+
+      09/28/95  Ron Colmone  Par# 218825
+                Corrected error in rectangle to absolute cursor
+                position convertion.
+
+      11/13/95  Ron Colmone  Par# 227305
+                Added support for cursor positioning variable
+                definition.
+
+   ****************************************************************** */
+
+struct sksstmt * sksrun(
+    struct stghdrq *qh,         /* Storage queue header for messages  */
+    struct image   *i,          /* Current state image structure      */
+    MSGBUF **msgq,              /* Message buffer queue anchor        */
+    void   *varpool,            /* Variable Pool Anchor               */
+    struct navparm *nvp,        /* navparm origin                     */
+    struct sksstmt *s   )       /* sks script origin                  */
+
+{
+
+    int      (*ifree)() ;
+    int      (*vres )() ;
+    int      formatted = FALSE ;
+    int      stmtlen, cursor, size, len, columns, row, col ;
+    int      j, varhit, poff ;
+    short    Nvar ;
+    unsigned char *p, *img ;
+
+
+    struct nvcoldf   *vartab ;
+    struct svarsect  *sv ;
+    struct image     *loci, *ri = 0 ;
+    struct recentry  *re ;
+
+    struct sksstmt   *stmterr = 0 ;
+    struct sks_text  *stxt  ;
+    struct sks_csr   *scsr  ;
+    struct sks_rgn   *srgn  ;
+    struct sks_loc   *sloc  ;
+    struct sks_var   *svar  ;
+    struct sks_blk   *sblk  ;
+
+    int           skip    = FALSE ;
+    unsigned char rptrgn  = FALSE ;
+
+    VMLIST vml ;
+    VINFO  vinfo ;
+
+    memset( &vinfo, 0 , sizeof vinfo ) ;
+
+/*  -----------------------------------------------------------------
+    Set image endpoints, size and current cursor position
+    ----------------------------------------------------------------- */
+    size    = i->imagesz ;
+    img     = i->buffer  ;
+    columns = i->cols ;
+
+    if ( (cursor = i->csrp) < 0 ÝÝ (cursor >= size) )
+        cursor = -1 ;
+
+    if ( i->attrib2 & attrib2_FMT )
+        formatted = TRUE ;
+
+/*  -----------------------------------------------------------------
+    Process sks statements until end of script or an error occurs.
+    ----------------------------------------------------------------- */
+    while ( ! stmterr && s->verb != SKSV_END )  {
+
+        switch( s->verb )  {
+
+/*          ---------------------------------------------------------
+            Start of block for one variable : set cancel flag
+            --------------------------------------------------------- */
+
+            case SKSV_BLK:
+
+                sblk    = (struct sks_blk *) s ;
+                stmtlen = sizeof( struct sks_blk ) ;
+                varhit = FALSE ;
+
+                if ( ! ( sblk->flags & VAR_LIT ) ) {
+
+                    poff = nvp->poff ;
+                    Nvar   = nvp->varsn ;
+                    vartab = (struct nvcoldf *)((char *)nvp+poff) ;
+
+                    for ( j = 0 ; ! varhit && j < Nvar; j++ )  {
+                         sv = (struct svarsect *) vartabíjù.rvar ;
+
+                         if ( !(memcmp( sblk->stnname, sv->svarsnam,
+                                sizeof sblk->stnname ) ) &&
+                              !(memcmp( sblk->varname, sv->svarname,
+                                sizeof sblk->varname ) ) ) {
+                              varhit = TRUE ;
+                              if ( !(vartabíjù.stat1 & ST1_INP) )
+                                   skip = TRUE ;
+                         }
+                    }
+
+                    if ( skip )
+                         break ;
+
+                    if ( ( !( varget( vml, SCOPE_USER, 0, sblk->varname,
+                                  sizeof sblk->varname, varpool ) ) ) ÝÝ
+                        ( vml.vmlrsncd == RSN_NOT_FOUND ) ) {
+
+
+                        if ( sblk->flags & VAR_REQ ) {
+                            stmterr = s ;
+                            fmtmsg( qh, msgq, 8,
+                                    sizeof sblk->varname, sblk->varname,
+                                    FMTMSG_END ) ;
+                        }
+                        else
+                            skip = TRUE ;
+                    }
+                }
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            retrieve matching recorded literal
+            --------------------------------------------------------- */
+
+            case SKSV_CSR:
+
+                scsr    = (struct sks_csr *) s ;
+                stmtlen = sizeof( struct sks_csr ) ;
+
+                if ( skip )
+                     break ;
+
+                if ( scsr->csrp < 0 ÝÝ scsr->csrp >= size ) {
+                     fmtmsg( qh, msgq, 1, FMTMSG_END ) ;
+                     stmterr = s ;
+                }
+                else
+                     cursor = scsr->csrp ;
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            erase eof - wrap may occur if image is formatted
+            --------------------------------------------------------- */
+
+            case SKSV_EOF:
+
+                stmtlen = sizeof( struct sksstmt ) ;
+                p = img + cursor ;
+
+                if ( skip )
+                     break ;
+
+                if ( cursor < 0 ÝÝ isattr( *p ) ) {
+                    fmtmsg( qh, msgq, 2, FMTMSG_END ) ;
+                    stmterr = s ;
+                }
+                else
+                    padfill( i, p, 0, 0) ;
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            text entry - performed in two parts to accomodate wrap
+            --------------------------------------------------------- */
+
+            case SKSV_TEXT:
+
+                stxt    = (struct sks_text *) s ;
+                stmtlen = sizeof( struct sks_text ) + stxt->textlen ;
+
+                if ( skip )
+                     break ;
+
+                if ( cursor < 0 ) {
+                    fmtmsg( qh, msgq, 2, FMTMSG_END ) ;
+                    stmterr = s ;
+                }
+                else  {
+                    len = (vinfo.length) ? vinfo.length : stxt->textlen;
+
+                    if ( ! ( instext( img, &cursor, size,
+                                      len,
+                                      stxt->text,
+                                      stxt->textlen,
+                                      formatted     ) ) ) {
+                        fmtmsg( qh, msgq, 3, FMTMSG_END ) ;
+                        csrtorc( cursor, columns, &row, &col ) ;
+                        fmtmsg( qh, msgq, 11,
+                                FMTMSG_INT, row, FMTMSG_INT, col,
+                                FMTMSG_END ) ;
+                        stmterr = s ;
+                    }
+                    else {
+                        if ( stxt->textlen > len ) {
+                            csrtorc( cursor, columns, &row, &col ) ;
+                            fmtmsg( qh, msgq, 13, FMTMSG_END ) ;
+                            fmtmsg( qh, msgq, 11,
+                                    FMTMSG_INT, row, FMTMSG_INT, col,
+                                    FMTMSG_END ) ;
+                            stmterr = s ;
+                            break ;
+                        }
+                        if ( stxt->padchar )
+                            padfill(i,(img + cursor),stxt->padchar, 0);
+                    }
+                }
+
+                memset( &vinfo, 0 , sizeof vinfo ) ;
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            Region Locator - Obtain region rectangle in image
+            --------------------------------------------------------- */
+
+            case SKSV_RGN:
+
+                srgn    = (struct sks_rgn *) s ;
+                stmtlen = sizeof( struct sks_rgn ) ;
+
+                if ( skip )
+                     break ;
+
+                rptrgn  = srgn->flags & REPEATING ;
+                if ( re = findrgn( i->re, srgn->rgnname, rptrgn ) ) {
+
+                    if ( ri ) {
+                        ifree = ( int (*)() ) getfunc( "IMGFREE" ) ;
+                        (ifree)( qh, &ri ) ;
+                    }
+
+                    if ( ! ( ri = rectcpy( qh, i,
+                                           &re->rsmry.abs,
+                                           srgn->rgnname  ) ) ) {
+                        stmterr = s ;
+                        fmtmsg( qh, msgq, 4,
+                                sizeof srgn->rgnname, srgn->rgnname,
+                                FMTMSG_END ) ;
+                    }
+                }
+
+                else {
+                    if ( ! rptrgn ) {
+                        stmterr = s ;
+                        fmtmsg( qh, msgq, 5,
+                                sizeof srgn->rgnname, srgn->rgnname,
+                                FMTMSG_END ) ;
+                    }
+                }
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            Variable locator - Set current postition by locator
+            --------------------------------------------------------- */
+
+            case SKSV_LOC:
+
+                sloc    = (struct sks_loc *) s ;
+                stmtlen = sizeof( struct sks_loc ) ;
+
+                if ( skip && !(sloc->var->svarflg2 & svarf2cp) )
+                     break ;
+
+                if ( sloc->flags & LOC_RGN ) {
+                    if ( ! ( loci = ri ) ) {
+                        if ( rptrgn ) {
+                            skip = TRUE ;
+                            break ;
+                        }
+                        else {
+                            stmterr = s ;
+                            fmtmsg( qh, msgq, 6,
+                                    sizeof sloc->var->svarname,
+                                    sloc->var->svarname,
+                                    FMTMSG_END ) ;
+                        }
+                    }
+                }
+                else
+                    loci = i ;
+
+                vres = ( int (*)() ) getfunc( "IVARRES" ) ;
+
+                if ( (vres)( loci, sloc->var, &vinfo ) ) {
+                    cursor = (vinfo.origin - loci->buffer) ;
+
+                    if ( sloc->flags & LOC_RGN )
+                        cursor = csrrtoa( i, re, cursor ) ;
+                }
+                else {
+                    stmterr = s ;
+                    fmtmsg( qh, msgq, 7,
+                            sizeof sloc->var->svarname,
+                            sloc->var->svarname,
+                            FMTMSG_END ) ;
+                }
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            Variable Substitution - Retrieve variable and insert text
+            --------------------------------------------------------- */
+
+            case SKSV_VAR:
+
+                svar    = (struct sks_var *) s ;
+                stmtlen = sizeof( struct sks_var ) ;
+
+                if ( skip )
+                     break ;
+
+                if ( svar->flags & VAR_PAD )
+                    padfill( i, (img + cursor),
+                             svar->padchar, vinfo.length ) ;
+
+                if ( ! ( instext( img, &cursor, size,
+                                  vinfo.length,
+                                  vml.vmlvar,
+                                  vml.vmlvarln,
+                                  formatted      ) ) )  {
+                    fmtmsg( qh, msgq, 9,
+                            sizeof svar->varname, svar->varname,
+                            FMTMSG_END ) ;
+                    csrtorc( cursor, columns, &row, &col ) ;
+                    fmtmsg( qh, msgq, 11,
+                            FMTMSG_INT, row, FMTMSG_INT, col,
+                            FMTMSG_END ) ;
+                    stmterr = s ;
+                }
+                else {
+                    if ( vml.vmlvarln > vinfo.length ) {
+                        fmtmsg( qh, msgq, 12,
+                                sizeof svar->varname, svar->varname,
+                                FMTMSG_END ) ;
+                        csrtorc( cursor, columns, &row, &col ) ;
+                        fmtmsg( qh, msgq, 11,
+                                FMTMSG_INT, row, FMTMSG_INT, col,
+                                FMTMSG_END ) ;
+                        stmterr = s ;
+                        break ;
+                    }
+                }
+
+                memset( &vinfo, 0 , sizeof vinfo ) ;
+
+                break ;
+
+
+/*          ---------------------------------------------------------
+            Exit from block - reset the cancel flag
+            --------------------------------------------------------- */
+
+            case SKSV_XIT:
+
+                stmtlen = sizeof( struct sksstmt ) ;
+
+                skip = FALSE ;
+                break ;
+
+/*          ---------------------------------------------------------
+             ERROR - invalid SKS statement type
+            --------------------------------------------------------- */
+
+            default:
+
+                stmtlen = 0 ;
+                stmterr = s ;
+                fmtmsg( qh, msgq, 99, FMTMSG_END ) ;
+                break ;
+        }
+
+    /*  skstrace( s, stmtlen ) ;  */
+        s = (struct sksstmt *) ((char *) s + stmtlen) ;
+    }
+
+    if ( ri ) {
+        ifree = ( int (*)() ) getfunc( "IMGFREE" ) ;
+        (ifree)( qh, &ri ) ;
+    }
+
+    i->csrp = cursor ;
+    return stmterr ;
+}
+
+
+/* ******************************************************************
+
+   Function: instext - Insert Text into image at cursor location
+
+   Description:
+
+     This function will insert text into the image buffer starting
+     at the current cursor position.  If the current position is
+     in a protected field or text insertion runs into an attribute
+     byte,  then text insertion will fail.  The text will be inserted
+     into the image for the minimum of text length or variable slot
+     length.  Therefore,  if the slot length is shorter than the
+     text length,  the text will be tructated.
+
+   Entry:   Address of image buffer origin
+            Address of current cursor position (returned)
+            Size of image buffer
+            Length of variable insertion slot
+            Address of insertion text
+            Length of insertion text
+            True if image is formatted
+
+
+   Return:  True  - Text insertion successful
+            False - Text insertion failed
+
+   ****************************************************************** */
+
+int instext( char *bufr,            /* Address of image buffer        */
+             int  *csrp,            /* Pointer to cursor position     */
+             int  size,             /* Size of image buffer           */
+             int  vlen,             /* Variable slot size             */
+             char *text,            /* Address of insertion text      */
+             int  textl,            /* Length of insertion text       */
+             int  formatted )       /* True if formatted image        */
+{
+
+    int   tl, j, mdtset = FALSE ;
+    unsigned char *t, *p, *endbufr, *attr ;
+
+/*  -----------------------------------------------------------------
+    Set starting/ending position and length of text insertion
+    ----------------------------------------------------------------- */
+    p       = bufr + *csrp ;
+    endbufr = bufr + size ;
+
+    tl  = min( vlen, textl ) ;
+    t   = text ;
+    j   = min( tl, size - *csrp ) ;
+    tl -= j ;
+
+/*  -----------------------------------------------------------------
+    If processing a formatted screen,  retrieve attribute byte
+    associated with current position and fail insert into protected
+    field.
+    ----------------------------------------------------------------- */
+    if ( formatted ) {
+        attr = getattr( bufr, p, size ) ;
+        if ( *attr & ATTR_PROTECT )
+            return FALSE ;
+    }
+
+/*  -----------------------------------------------------------------
+    Insert text into image until end of screen or until attribute
+    detected.
+    ----------------------------------------------------------------- */
+    while ( j-- && ! isattr( *p ) ) {
+        if ( ! mdtset && formatted ) {
+            mdtset = TRUE ;
+            setmdt( bufr, p, size ) ;
+        }
+        *p++ = *t++ ;
+    }
+
+/*  -----------------------------------------------------------------
+    If text remaining to insert,  fail insert text request due to
+    attribute detected.
+    ----------------------------------------------------------------- */
+    if ( j >= 0 )
+        return FALSE ;
+
+    else  {
+/*      -------------------------------------------------------------
+        If end of buffer detected,  reset position and continue
+        text insertion at top of screen.
+        ------------------------------------------------------------- */
+        if ( p == endbufr )
+            p = bufr ;
+
+        while ( tl-- && !isattr( *p ) ) {
+            if ( ! mdtset && formatted ) {
+                mdtset = TRUE ;
+                setmdt( bufr, p, size ) ;
+            }
+            *p++ = *t++ ;
+        }
+
+        if ( tl >= 0 )
+            return FALSE ;
+    }
+
+    *csrp = p - bufr ;
+    return TRUE ;
+}
+
+
+/* ******************************************************************
+
+   Function: padfill - Fill field from current pos with Pad Character
+
+   Description:
+
+     This function will fill the field from current position
+     with the specified pad character.  If the image is unformatted,
+     it will be padded to the end of the image with the specified
+     pad character.
+
+   Entry:  Address of image structure
+           Address of current position
+           Pad character
+
+   Return: Current position
+
+   ****************************************************************** */
+
+char * padfill( struct image *i,
+                char   *currpos,
+                char   padchar,
+                int    maxlen ) {
+
+    unsigned char *p, *endimg ;
+    int      formatted = FALSE, len, endfld ;
+    short    padlen ;
+
+    if ( i->attrib2 & attrib2_FMT )
+        formatted = TRUE ;
+
+    p      = currpos ;
+    endimg = i->buffer + i->imagesz ;
+
+/*  -----------------------------------------------------------------
+    If unformatted image,  fill to end of image otherwise
+    fill image to end of field.
+    ----------------------------------------------------------------- */
+    if ( ! formatted )
+        padlen = endimg - p ;
+    else
+        if ( endfld = locfld( i, (p - i->buffer), &len ) )
+            padlen = endfld - ( p - i->buffer ) - 1 ;
+        else
+            padlen = endimg - p ;
+
+    if ( maxlen )
+        padlen = min( maxlen, padlen ) ;
+
+    if ( padlen ) {
+        memset( p, padchar, padlen ) ;
+        if ( formatted )
+            setmdt( i->buffer, p, i->imagesz ) ;
+    }
+
+    p += padlen ;
+
+    if ( p >= endimg )
+        p = i->buffer ;
+
+    return ( p ) ;
+
+}
+
+
+/* ******************************************************************
+
+   Function: setmdt - Set modified field attribute
+
+   Description:
+
+     This function will set the modified data attribute for the
+     field at the current position.
+
+   Entry:  Address of image buffer origin
+           Address of current position
+           Size of image buffer
+
+   Return:  Void
+
+   ****************************************************************** */
+
+void setmdt( char *image, char *currpos, int size ) {
+
+    unsigned char *attr ;
+
+    if ( attr = getattr( image, currpos, size ) )
+        *attr Ý= ATTR_MDT ;
+
+    return ;
+
+}
+
+
+/* ******************************************************************
+
+   Function: getattr - Locate attribute associated with field
+
+   Description:
+
+     This function will locate the attribute byte on a formatted
+     image for the field associated with the current position.
+
+   Entry:  Address of image buffer origin
+           Address of current position
+           Size of image buffer
+
+   Return: Address of attribute byte or 0 if unformatted image
+
+   ****************************************************************** */
+
+unsigned char * getattr( char *image, char *currpos, int size ) {
+
+    unsigned char *p ;
+
+    p = currpos ;
+
+    while ( (--p >= image) && ! isattr( *p ) ) ;
+
+    if ( p < image ) {
+        p = image + size ;
+        while ( (--p >= image) && ! isattr( *p ) ) ;
+    }
+
+    if ( isattr( *p ) )
+        return p ;
+    else
+        return 0 ;
+}
+
+
+
+/* ******************************************************************
+
+   Function: findrgn - Locate region rectangle
+
+   Description:
+
+     This function will locate is a specific region in rectree
+     tiled for the current image.  If the region is available
+     the associated recentry address is returned.
+
+   Entry:  Address of the root recentry for the image
+           Address of the region name
+           Repeating region flag
+
+   Return: Address of the first recentry instance in the image
+           0 = Region not found in image
+
+   ****************************************************************** */
+
+struct recentry * findrgn( struct recentry *rt,
+                           char         *rgnname,
+                           unsigned char rep )
+{
+    struct recentry *re ;
+
+    for ( re = rt ; re ; re = re->next )
+        if ( ! ( memcmp( re->rn->rgn->name, rgnname ,
+                         sizeof re->rn->rgn->name ) ) &&
+               ( ! rep || ( re->flag & flag_CURR ) ) )
+           break ;
+
+    return re ;
+
+}
+
+
+/* ******************************************************************
+
+    Function: isattr - Validate if char is a 3270 field attribute
+
+    Description:
+
+      This function will determine if the character provided
+      represents a 3270 field attribute byte in the host internal
+      image format.
+
+    Entry:  Character to test
+
+    Return: TRUE  - Character is an attribute byte
+            FALSE - Character is not an attribute byte
+
+   ****************************************************************** */
+
+int isattr( char byte )
+{
+
+    return ( byte >= ATTR_RANGE_START && byte <= ATTR_RANGE_END ) ;
+
+}
+
+/* ******************************************************************
+
+   Function: csrtorc - Convert cursor position to row/col
+
+   Description:
+
+     This function will convert the current cursor position to
+     row/column format.
+
+   Entry:  Cursor position
+           Columns per row
+           Address of Row    number
+           Address of Column number
+
+   Return: Void
+
+   ****************************************************************** */
+
+void csrtorc( int csrp, int columns, int *row, int *col ) {
+
+    *row = ( csrp / columns ) + 1 ;
+    *col = csrp - ( ( *row - 1 ) * columns ) + 1 ;
+
+}
+
+/* ******************************************************************
+
+   Function: rctocsr - Convert row/col to cursor position
+
+   Description:
+
+     This function will convert the specified row/col coords to
+     relative cursor position.
+
+   Entry:  Row
+           Column
+           Number of columns/row
+
+   Return: Relative cursor position
+
+   ****************************************************************** */
+
+int rctocsr( int row, int col, int columns ) {
+
+   return( ((row - 1) * columns) + (col - 1) ) ;
+
+}
+
+/* ******************************************************************
+
+   Function: csrrtoa - Conv rectangle csrpos to absolute csrpos
+
+   Description:
+
+     This function will convert the rectangle cursor postion to
+     the rectangle cursor position.
+
+   Entry:  Presentation space Image structure (ABS)
+           Rect entry structure describing rectangle
+           Rectangle Cursor position
+
+   Return: Absolute Cursor position
+
+   ****************************************************************** */
+
+int  csrrtoa( struct image *i, struct recentry *re, int csr ) {
+
+    int   row, col ;
+
+    csrtorc( csr, re->rsmry.cols, &row, &col ) ;
+
+    row = row + re->rsmry.abs.ul.r - 1 ;
+    col = col + re->rsmry.abs.ul.c - 1 ;
+
+    return ( rctocsr( row, col, i->cols ) ) ;
+}
+
+/* ******************************************************************
+
+   Function: fmtmsg - Format Message and append to message queue
+
+   Description:
+
+     This function will construct a message to be posted to the
+     message queue provided.  A variable number of message substitution
+     element text strings may be provided.  The list is terminated
+     with the FMTMSG_END integer.
+
+   Entry:  Address of storage queue header
+           Address of message queue anchor
+           Message ID
+           Variable number of message substitution elements in the
+           format of ,(int) textlen, (char *) text, ..., FMTMSG_END)
+
+   Return: Void
+
+   ****************************************************************** */
+/*void fmtmsg( struct stghdrq *qh, struct MSGBUF **msgq, int msgnum, ... )*/
+void fmtmsg( struct stghdrq *qh, MSGBUF **msgq, int msgnum, ... )
+{
+   va_list ap ;
+   MSGH    msgh ;
+
+   int  textl, val ;
+   char *text ;
+
+   char msgareaí256ù ;
+
+/* ------------------------------------------------------------------
+   Initialize message processing
+   ------------------------------------------------------------------ */
+   memset( msgarea, 0, sizeof msgarea ) ;
+
+   msgdft( &msgh, MSGDEFAULT, "SKS", MSGDEFAULT, MSGDEFAULT, MSGDEFAULT,
+           msgarea, sizeof msgarea, MSGID, BUFFER,0,0,0,0 )  ;
+
+/* ------------------------------------------------------------------
+   Add message substitution elements
+   ------------------------------------------------------------------ */
+   va_start( ap, msgnum ) ;
+
+   while ( ( textl = va_arg( ap, int ) ) != FMTMSG_END ) {
+       if ( textl == FMTMSG_INT ) {
+           val  = va_arg( ap, int ) ;
+           maddint( msgh, val ) ;
+       }
+       else {
+           text = va_arg( ap, char * ) ;
+           maddstr( msgh, text, textl ) ;
+       }
+   }
+
+/* ------------------------------------------------------------------
+   Format message
+   ------------------------------------------------------------------ */
+   msg( &msgh, msgnum, 0 ) ;
+
+/* ------------------------------------------------------------------
+   Add message to message queue
+   ------------------------------------------------------------------ */
+   enqmsg( (MSGBUF *) msgarea, msgq, qh )  ;
+
+   return ;
+
+}
+
+/* ******************************************************************
+
+   Function: skstrace - Trace sks statement execution
+
+   Description:
+
+      This function will issue a trace message to dump the
+      first 16-bytes of the SKS statement being executed.
+
+   Entry:  Address of sks statement
+           Length of sks statement
+
+   Return: Void
+
+   ****************************************************************** */
+
+void skstrace( struct sksstmt *s, int stmtlen )
+{
+
+   MSGH    msgh ;
+   int     qlen ;
+
+   union   words {
+       char dataí16ù ;
+       long wordí4ù ;
+   } w ;
+
+   qlen = stmtlen - sizeof( struct sksstmt ) ;
+
+/* ------------------------------------------------------------------
+   Initialize message processing
+   ------------------------------------------------------------------ */
+   msgdft( &msgh, MSGDEFAULT, "SKS", MSGDEFAULT, MSGDEFAULT, MSGDEFAULT,
+           MSGDEFAULT, 0, MSGID,0,0,0,0,0 )  ;
+
+/* ------------------------------------------------------------------
+   copy sks statement to workarea
+   ------------------------------------------------------------------ */
+   memset( w.data, 0, sizeof w.data ) ;
+   memcpy( w.data, s->qual, min( sizeof w.data , qlen ) ) ;
+
+/* ------------------------------------------------------------------
+   Initialize message fields and issue message
+   ------------------------------------------------------------------ */
+   maddstr( msgh, &s->verb, sizeof s->verb ) ;
+   maddint( msgh, qlen ) ;
+   maddint( msgh, w.wordí0ù ) ;
+   maddint( msgh, w.wordí1ù ) ;
+   maddint( msgh, w.wordí2ù ) ;
+   maddint( msgh, w.wordí3ù ) ;
+
+   msg( &msgh, 901, 0 ) ;
+
+}
+

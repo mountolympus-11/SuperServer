@@ -1,0 +1,177 @@
+/**********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005, 2006    *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*                                                                     *
+**********************************************************************/
+#include <stddef.h>
+#include <string.h>
+
+#include "env.h"                       /* storage manager             */
+#include "stgmgr.h"                    /* storage manager             */
+#include "cmdscan.h"                   /* command scan                */
+#include "csp.h"                       /* command scan and post       */
+
+#define NULLP ((void *) 0)
+
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* CmdScanPost - Post default values and command string's keyword     */
+/* values to control block.                                           */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+/*                                                                    */
+/* 1. Apply all default values from the supplied operand-post-control */
+/*    table (postops) to the supplied control block.                  */
+/*                                                                    */
+/* 2. Parse supplied command string to extract keyword values.        */
+/*                                                                    */
+/* 3. Post keyword values to the supplied control block.              */
+/*                                                                    */
+/* Notes:                                                             */
+/* Keyword table and postops table must be terminated with a null-    */
+/* table-entry (required by scankey in cmdscan).                      */
+/*                                                                    */
+/*--------------------------------------------------------------------*/
+
+int CmdScanPost(
+  struct keytab *  KeyTable,           /* i/  - keyword table         */
+  int              KeyEntries,         /* i/  - keyword table entries */
+  struct postops * OpcTable,           /* i/  - operand-post control  */
+  char *           KeyString,          /* i/  - keyword command string*/
+  void *           ControlBlock,       /* i/  - control block to post */
+  char *           ErrorMsg            /* i/  - error message buffer  */
+  )
+
+{
+
+typedef union uPep                     /* just to clarify things      */
+  {
+  void *           Generic;
+  struct keytab *  Keytab;
+  struct postops * PostOp;
+  } tPep;
+
+  struct stghdrq   StgQ;               /* storage anchor area         */
+  int (*           stgallc)();         /* storage allocator           */
+  int (*           stgfree)();         /* storage releaser            */
+  struct oplist *  KeyValueList;       /* list of keyword values      */
+  char **          ScanNext;           /* command string location     */
+  char *           ErrorString;        /* cmdscan's error message     */
+  char *           ErrorLocation;      /*                             */
+  int              EntryIndex;         /* keyword-table entry found   */
+  tPep             ErrorEntry;         /* posting-error entry         */
+  int              PostRc;             /* post return code            */
+  int              ParseRc;            /* parse return code           */
+  int              Rc;                 /* storage initialization rc   */
+
+  stgallc = (int (*)())getfunc("XALOC31");
+  stgfree = (int (*)())getfunc("XFREE");
+
+  /*
+  ** Apply all default values to the supplied control block.
+  */
+
+  PostRc = prmpost(                    /* post operand values to CB   */
+    KeyTable,                          /* i/  - keyword table         */
+    0,                                 /* i/  - apply default values  */
+    OpcTable,                          /* i/  - operand post control  */
+    ControlBlock,                      /* i/o - control block to post */
+    &ErrorEntry.Generic,               /*  /o - POSTOP entry in error */
+    ErrorMsg                           /*  /o - error data if error   */
+    );
+
+  if (PostRc != 0)                     /* error posting defaults ?    */
+    {
+    return(CspErrorDefaults);          /* yes. programming error      */
+    }
+
+  /*
+  ** Allocate and initialize temporary list to contain keyword values.
+  */
+
+  Rc = stginit(                        /* initialize storage queue    */
+    &StgQ,                             /* i/o - storage queue         */
+    4096,                              /* i/  - block size            */
+    stgallc,                           /* i/  - allocation routine    */
+    stgfree,                           /* i/  - release routine       */
+    0                                  /* i/  - lock routine          */
+    );
+
+  if (Rc != STGOK)
+    {
+    return(CspErrorStginit);
+    }
+
+  KeyValueList =
+    (struct oplist *)stgget(&StgQ, sizeof(struct oplist) * KeyEntries);
+
+  if (KeyValueList == NULLP)          /* allocated ?                  */
+    {
+    stgterm(&StgQ);
+    return(CspErrorStgget);           /* no, allocation error         */
+    }
+
+  memset(KeyValueList, '\0', sizeof(struct oplist) * KeyEntries);
+
+  /*
+  ** Parse entire string, extract keyword values, and populate keyword-
+  ** values list.
+  */
+
+  for (ScanNext = &KeyString, ParseRc = 0;
+    ParseRc == 0; )
+    {
+    ParseRc = cmdscan(                 /* scan/parse command string   */
+      KeyTable,                        /* i/  - keyword table         */
+      KeyValueList,                    /* i/o - list of keyword values*/
+      ScanNext,                        /* i/o - scan start (updated)  */
+      &EntryIndex,                     /*  /o - matched keyword-entry */
+      &ErrorString,                    /*  /o - parse-error message   */
+      &ErrorLocation                   /*  /o - error origin in string*/
+      );
+    } /* for (ScanPosition... */
+
+  if (ParseRc != PARSE_EOS)            /* all parsed ?                */
+    {
+    strcpy(ErrorMsg, ErrorString);     /* no, error                   */
+    stgterm(&StgQ);
+    return(CspErrorScan);
+    }
+
+  /*
+  ** Populate control block with values from keyword-values list.
+  */
+
+  PostRc = prmpost(                    /* post values to control block*/
+    KeyTable,                          /* i/  - keyword table         */
+    KeyValueList,                      /* i/  - list of keyword values*/
+    OpcTable,                          /* i/  - operand post control  */
+    ControlBlock,                      /* i/o - control block to post */
+    &ErrorEntry.Generic,               /*  /o - KEYTAB entry in error */
+    ErrorMsg                           /* i/o - error msg if error    */
+    );
+
+  if (PostRc != 0)                     /* all posted ?                */
+    {                                  /* no, message already set     */
+    stgterm(&StgQ);
+    return(CspErrorPost);
+    }
+
+  stgterm(&StgQ);
+
+  return(CspOK);
+
+} /* CmdScanPost */
